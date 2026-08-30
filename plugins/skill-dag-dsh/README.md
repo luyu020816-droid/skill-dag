@@ -50,7 +50,7 @@ dsh plugin --profile web add skill-dag-dsh
 ## 构建与本地验证
 
 ```sh
-cd plugin
+cd plugins/skill-dag-dsh
 npm install          # 需要 pnpm 在 PATH（DSH 用 pnpm 管理依赖）
 npm run build        # → lib/index.js (host ESM) + lib/client.js (lazy-CJS factory)
 # 本地装：

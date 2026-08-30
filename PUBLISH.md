@@ -34,16 +34,34 @@ npm publish
 - 名字先查重：`npm view skill-dag`（若被占用，改 `@<你的用户名>/skill-dag` 或 `grasp-dag`）
 - 后续版本：改 `version`（`npm version patch/minor/major`）再 `npm publish`
 
-### 3. DSH 插件 bundle（plugin/ 目录，等研究结果落地后）
+### 3. DSH 插件 bundle（plugins/skill-dag-dsh/，已就绪）
 
-- 按研究得出的格式生成 `cordis.patch.yml` + client bundle
-- 发布为独立 npm 包（如 `skill-dag-dsh`）
-- **必须**在 README 写清「安装 + 重启后从 dsh-market 可见」
+- 结构：`cordis.patch.yml`（`dsh.bundle.patch`）+ `dsh.client {platform: web}` + `exports["./client"]` lazy-CJS factory + `screenshots.json`（相对路径图片，禁 `..`）
+- 发布为独立 npm 包 `skill-dag-dsh`（`repository` 字段必须指回本仓库，否则与市场条目无法关联）
+
+```sh
+cd D:\dsh\grasp-release\plugins\skill-dag-dsh
+npm install
+npm run build        # 验证通过后再 publish
+npm publish
+# 验证：npm view skill-dag-dsh
+```
 
 ### 4. awesome-dsh-plugin 上架（让 dsh-market 收录）
 
-- 打开 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 提 PR，加一条 entry（格式见 `plugins.json` 里现有条目：name/description/repo/npm 映射）
-- PR 合并后 **dsh-market 自动收录**（通常一天内），DSH 用户就能在 设置→Plugin Market 搜到、一键安装
+前置门槛（CI 自动检查）：
+- [ ] 仓库 `package.json` 声明 `dsh.bundle`（在根或 `packages/`·`plugins/`·`apps/` 子目录——注意是**复数** `plugins/`，本仓库已按此布局）
+- [ ] 仓库创建满 **1 天** 且 **≥10 commits**（已凑够 10 个）
+- [ ] repo 加 **`dsh-plugin` topic**
+- [ ] 只有 `dsh.client` 会被拒；必须有 `dsh.bundle`
+
+PR 步骤（在 awesome-dsh-plugin 仓库）：
+1. 新建 `data/plugins/<owner>__skill-dag--plugins-skill-dag-dsh.yml`（monorepo 子包格式，草稿在 `docs/awesome-dsh-plugin-entry.yml`，替换 `<owner>` 后复制）
+2. `npm ci && node scripts/generate-readme.mjs` 重新生成 README 一并提交（README 是生成的，勿手改）
+3. 提交 PR；一个 PR 最多 3 条 entry
+4. 合并后 dsh-market 自动收录（约一天内），DSH 用户 设置→Plugin Market 可搜到
+
+截图：可选但强烈推荐——仓库自带 `screenshots.json`（1-8 张，路径相对该文件、不能含 `..`、不能跳出插件目录）。本仓库已声明 `plugins/skill-dag-dsh/screenshots.json` → `assets/` 下 PNG+SVG。
 
 ## 二、推广策略（热度来源）
 

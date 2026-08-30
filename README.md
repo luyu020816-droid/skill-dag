@@ -78,14 +78,15 @@ const { createGraspCore, memoryStore, manifestSource, createProposer } = require
 ## 仓库结构
 
 ```
-├── skill-dag/          # 零依赖核心 npm 包（createGraspCore + adapters）
-│   ├── index.js        # 核心引擎
-│   ├── index.d.ts      # TypeScript 声明
-│   └── test/verify.js  # 18 项回归断言（npm test）
-├── plugin/             # DSH 插件 bundle（cordis.patch.yml + client）
-│   └── …               # 见 plugin/README.md
-├── grasp-spec.md       # 完整复刻规格（自包含，可独立复刻）
-└── LICENSE             # MIT
+├── skill-dag/                  # 零依赖核心 npm 包（createGraspCore + adapters）
+│   ├── index.js                # 核心引擎
+│   ├── index.d.ts              # TypeScript 声明
+│   └── test/verify.js          # 18 项回归断言（npm test）
+├── plugins/skill-dag-dsh/      # DSH 插件 bundle（cordis.patch.yml + client + screenshots）
+│   └── …                       # 见 plugins/skill-dag-dsh/README.md
+├── docs/                       # demo 截图 + awesome-dsh-plugin 条目 + 推广草稿
+├── grasp-spec.md               # 完整复刻规格（自包含，可独立复刻）
+└── LICENSE                     # MIT
 ```
 
 ## 论文对齐
