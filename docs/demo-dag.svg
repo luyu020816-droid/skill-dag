@@ -1,0 +1,30 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 206" style="background:#020617;border-radius:8px">
+  <defs><marker id="ah-state" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#3b82f6"/></marker><marker id="ah-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#a855f7"/></marker><marker id="ah-order" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker></defs>
+  <g>
+    <path d="M200,50 Q270,50 340,50" fill="none" stroke="#94a3b8" stroke-width="1.1" stroke-dasharray="2,4" marker-end="url(#ah-order)"/>
+    <path d="M200,50 Q270,108 340,166" fill="none" stroke="#94a3b8" stroke-width="1.1" stroke-dasharray="2,4" marker-end="url(#ah-order)"/>
+    <path d="M500,50 Q570,50 640,50" fill="none" stroke="#94a3b8" stroke-width="1.1" stroke-dasharray="2,4" marker-end="url(#ah-order)"/>
+    <path d="M500,166 Q570,108 640,50" fill="none" stroke="#94a3b8" stroke-width="1.1" stroke-dasharray="2,4" marker-end="url(#ah-order)"/>
+    <g>
+    <title>src | pre:  | eff: </title>
+    <rect x="40" y="30" width="160" height="40" rx="8" fill="#0f172a" stroke="#334155" stroke-width="2"/>
+    <text x="120" y="54" fill="#f1f5f9" font-size="12" font-weight="600" text-anchor="middle" font-family="system-ui,sans-serif">START</text>
+  </g>
+    <g>
+    <title>brainstorming:1 | pre: creative_task_requested(task) | eff: requirements_defined(task), design_defined(task), implementation_ready(task)</title>
+    <rect x="340" y="30" width="160" height="40" rx="8" fill="#0f172a" stroke="#64748b" stroke-width="2"/>
+    <text x="420" y="54" fill="#f1f5f9" font-size="12" font-weight="600" text-anchor="middle" font-family="system-ui,sans-serif">brainstorming</text>
+  </g>
+    <g>
+    <title>tdd:1 | pre: feature_requested(feature) | eff: failing_test_written(feature), implementation_passes(feature), implementation_refactored(feature)</title>
+    <rect x="340" y="146" width="160" height="40" rx="8" fill="#0f172a" stroke="#64748b" stroke-width="2"/>
+    <text x="420" y="170" fill="#f1f5f9" font-size="12" font-weight="600" text-anchor="middle" font-family="system-ui,sans-serif">tdd</text>
+  </g>
+    <g>
+    <title>snk | pre: design_defined(task), failing_test_written(feature) | eff: </title>
+    <rect x="640" y="30" width="160" height="40" rx="8" fill="#0f172a" stroke="#334155" stroke-width="2"/>
+    <text x="720" y="54" fill="#f1f5f9" font-size="12" font-weight="600" text-anchor="middle" font-family="system-ui,sans-serif">GOAL</text>
+  </g>
+  </g>
+</svg>
+
