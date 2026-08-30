@@ -1,7 +1,7 @@
 # Promotion Drafts — 掘金 / HN / Reddit
 
 仓库创建满 1 天、≥10 commits 后再铺内容（awesome-dsh-plugin 门槛同时也是「首个开源」心智的窗口）。
-所有 `<owner>` / `skill-dag` 链接发布前替换为真实用户名。
+所有链接均已指向真实仓库 `luyu020816-droid/skill-dag`。
 
 ---
 
@@ -42,7 +42,7 @@ DeepSeek Harness 的真实 LLM 和真实技能库——不需要给技能写任�
 诚实边界：unofficial reproduction；LLM 推断谓词是符号性的 best-effort；
 检索是 token Jaccard 而非 embedding；DAG 假设无环。
 
-仓库：https://github.com/<owner>/skill-dag
+仓库：https://github.com/luyu020816-droid/skill-dag
 npm：https://www.npmjs.com/package/skill-dag
 论文：https://arxiv.org/abs/2604.17870
 ```
@@ -81,7 +81,7 @@ Two forms:
 - skill-dag: zero-dependency npm core package (any harness can reuse)
 - skill-dag-dsh: DSH plugin bundle (dsh plugin add)
 
-Repo: https://github.com/<owner>/skill-dag
+Repo: https://github.com/luyu020816-droid/skill-dag
 npm:   https://www.npmjs.com/package/skill-dag
 ```
 
@@ -115,7 +115,7 @@ Honest limits: unofficial; inferred predicates are symbolic best-effort;
 Jaccard-based retrieval (embedding is an easy swap point).
 
 Zero-dep npm core: https://www.npmjs.com/package/skill-dag
-DSH plugin + demo: https://github.com/<owner>/skill-dag
+DSH plugin + demo: https://github.com/luyu020816-droid/skill-dag
 ```
 
 ---

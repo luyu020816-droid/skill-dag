@@ -1,7 +1,7 @@
-# awesome-dsh-plugin entry — PR 时复制到 data/plugins/<owner>__skill-dag--plugins-skill-dag-dsh.yml
+# awesome-dsh-plugin entry — PR 时复制到 data/plugins/luyu020816-droid__skill-dag--plugins-skill-dag-dsh.yml
 # 仓库创建满 1 天 + ≥10 commits 后提交；repo 需加 dsh-plugin topic；README 由 CI 重新生成，勿手改
-url: https://github.com/<owner>/skill-dag/tree/main/plugins/skill-dag-dsh
-name: <owner>/skill-dag#skill-dag-dsh
+url: https://github.com/luyu020816-droid/skill-dag/tree/main/plugins/skill-dag-dsh
+name: luyu020816-droid/skill-dag#skill-dag-dsh
 category: workflow
 description:
   en: Compiles agent skills into typed executable DAGs (state/data/order edges) with LLM-inferred predicates, node verification, bounded local repair, and confidence routing, and renders the plan as a draggable SVG in the tool card.

@@ -3,8 +3,8 @@
 > 把扁平技能编译成**类型化可执行 DAG**（state/data/order 三类因果边），带节点验证、有界局部修复、记忆条件化检索与置信度路由——**DSH 真实 LLM 驱动，零手工标注**。
 
 [![npm](https://img.shields.io/npm/v/skill-dag)](https://www.npmjs.com/package/skill-dag)
-[![license](https://img.shields.io/github/license/yourname/skill-dag)](LICENSE)
-[![stars](https://img.shields.io/github/stars/yourname/skill-dag?style=flat)](https://github.com/yourname/skill-dag)
+[![license](https://img.shields.io/github/license/luyu020816-droid/skill-dag)](LICENSE)
+[![stars](https://img.shields.io/github/stars/luyu020816-droid/skill-dag?style=flat)](https://github.com/luyu020816-droid/skill-dag)
 
 **首个开源的 [GraSP](https://arxiv.org/abs/2604.17870)（Tencent 2026）复刻实现**，以 DeepSeek Harness 插件 + 零依赖 npm 核心包两种形态交付。
 

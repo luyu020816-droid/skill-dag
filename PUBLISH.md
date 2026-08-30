@@ -12,13 +12,13 @@ git init
 git add -A
 git commit -m "feat: first open-source GraSP implementation — skill-dag core + DSH plugin"
 # 在 github.com 建一个 public 仓库，名字建议：skill-dag（或 grasp-agent）
-git remote add origin git@github.com:<你的用户名>/skill-dag.git
+git remote add origin git@github.com:luyu020816-droid/skill-dag.git
 git branch -M main
 git push -u origin main
 ```
 
 提交前必做：
-- [ ] 在 README 顶部把两个 `yourname` 徽章链接换成你的真实用户名
+- [x] README 顶部徽章链接已换成真实用户名 `luyu020816-droid`（skill-dag）
 - [ ] 加一张 **demo 截图/GIF**（README 里那张 SVG 图的截图即可；有动图更好）——**有图 vs 没图的 star 差 3-5 倍**
 - [ ] GitHub repo 设置里加 **topics**：`grasp`、`llm-agent`、`skill`、`dag`、`planning`、`deepseek-harness`
 
@@ -31,7 +31,7 @@ npm publish
 # 验证：npm view skill-dag
 ```
 
-- 名字先查重：`npm view skill-dag`（若被占用，改 `@<你的用户名>/skill-dag` 或 `grasp-dag`）
+- 名字先查重：`npm view skill-dag`（若被占用，改 `@luyu020816-droid/skill-dag` 或 `grasp-dag`）
 - 后续版本：改 `version`（`npm version patch/minor/major`）再 `npm publish`
 
 ### 3. DSH 插件 bundle（plugins/skill-dag-dsh/，已构建验证通过 ✅）
@@ -58,7 +58,7 @@ npm publish          # 需要先 npm login
 - [ ] 只有 `dsh.client` 会被拒；必须有 `dsh.bundle`
 
 PR 步骤（在 awesome-dsh-plugin 仓库）：
-1. 新建 `data/plugins/<owner>__skill-dag--plugins-skill-dag-dsh.yml`（monorepo 子包格式，草稿在 `docs/awesome-dsh-plugin-entry.yml`，替换 `<owner>` 后复制）
+1. 新建 `data/plugins/luyu020816-droid__skill-dag--plugins-skill-dag-dsh.yml`（monorepo 子包格式，草稿在 `docs/awesome-dsh-plugin-entry.yml`，复制即可）
 2. `npm ci && node scripts/generate-readme.mjs` 重新生成 README 一并提交（README 是生成的，勿手改）
 3. 提交 PR；一个 PR 最多 3 条 entry
 4. 合并后 dsh-market 自动收录（约一天内），DSH 用户 设置→Plugin Market 可搜到
