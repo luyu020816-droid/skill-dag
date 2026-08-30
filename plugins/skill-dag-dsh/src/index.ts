@@ -127,9 +127,13 @@ export function apply(ctx: Context): void {
   })
 
   // ---- model tools ----
-  const OUT = { type: 'object', additionalProperties: true }
-  const renderJson = (_args: unknown, value: unknown) => [{ type: 'text', text: JSON.stringify(value) }]
-  const def = (toolDef: Parameters<typeof defineTool>[0]) => ctx.tools.register(defineTool(toolDef))
+  const OUT = { type: 'object', additionalProperties: true } as const
+  const renderJson = (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }]
+  // Tools return free-form JSON; defineTool's strict value inference rejects
+  // Record<string, unknown> results (TS2321/TS2322), so relax at the boundary.
+  // Runtime shape is unchanged (name/description/parameters/output/execute).
+  const def = (toolDef: Record<string, unknown>) =>
+    ctx.tools.register(defineTool(toolDef as never))
 
   def({
     name: 'grasp_compile_task',

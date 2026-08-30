@@ -34,16 +34,18 @@ npm publish
 - 名字先查重：`npm view skill-dag`（若被占用，改 `@<你的用户名>/skill-dag` 或 `grasp-dag`）
 - 后续版本：改 `version`（`npm version patch/minor/major`）再 `npm publish`
 
-### 3. DSH 插件 bundle（plugins/skill-dag-dsh/，已就绪）
+### 3. DSH 插件 bundle（plugins/skill-dag-dsh/，已构建验证通过 ✅）
 
 - 结构：`cordis.patch.yml`（`dsh.bundle.patch`）+ `dsh.client {platform: web}` + `exports["./client"]` lazy-CJS factory + `screenshots.json`（相对路径图片，禁 `..`）
+- **构建已验证**：`npm install && npm run build` 全绿——产物 `lib/index.js`（44KB host ESM，skill-dag 核心已内联，用户零依赖）+ `lib/client.js`（8.9KB lazy-CJS factory）+ `lib/types/`（声明）；`npm pack --dry-run` 13 文件 31.5kB；Node 冒烟加载 `name=grasp / inject / apply` 全部正确
+- 关键修正（与最初草稿不同）：peerDependencies 实际版本是 `cordis ^4.0.1`、`dsh-tools ^0.1.0-rc.2 || ^0.1.1-rc.2`（原写的 rc.5/rc.7 不存在）；`skill-dag` 移入 devDependencies 由 tsdown 内联，避免发布顺序依赖；tsdown 用官方双 build 结构 + `entryFileNames` 固定 `lib/index.js`/`lib/client.js`
 - 发布为独立 npm 包 `skill-dag-dsh`（`repository` 字段必须指回本仓库，否则与市场条目无法关联）
 
 ```sh
 cd D:\dsh\grasp-release\plugins\skill-dag-dsh
 npm install
-npm run build        # 验证通过后再 publish
-npm publish
+npm run build        # ✅ 已验证
+npm publish          # 需要先 npm login
 # 验证：npm view skill-dag-dsh
 ```
 

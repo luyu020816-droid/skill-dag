@@ -8,7 +8,8 @@
     "esModuleInterop": true,
     "allowJs": true,
     "checkJs": false,
-    "outDir": "lib",
+    "rootDir": "src",
+    "outDir": "lib/types",
     "declaration": true,
     "jsx": "react-jsx"
   },
