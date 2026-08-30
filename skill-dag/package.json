@@ -1,0 +1,39 @@
+{
+  "name": "skill-dag",
+  "version": "0.1.0",
+  "description": "GraSP-style skill DAG compiler: compile flat skill sets into typed executable DAGs (state/data/order edges) with verified execution, bounded local repair, memory-conditioned retrieval and confidence routing. Unofficial reproduction of Tencent's GraSP (arXiv:2604.17870).",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "import": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/verify.js"
+  },
+  "keywords": [
+    "grasp",
+    "llm",
+    "agent",
+    "skill",
+    "dag",
+    "planning",
+    "graph",
+    "orchestration",
+    "repair"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}
