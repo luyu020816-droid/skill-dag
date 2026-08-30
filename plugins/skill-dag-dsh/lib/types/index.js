@@ -75,7 +75,11 @@ export function apply(ctx) {
             '',
             'A predicate is a first-order atom like "clean(object)".',
             'Return the goal predicates that must be TRUE after the task completes.',
-            'Reuse the EXACT effect predicates from the list above (same strings), so the plan compiles.',
+            'Reuse the EXACT predicate NAMES and ARITY from the effects listed above.',
+            'But BIND the variables to concrete values taken from the task text.',
+            'Example: if a skill effect is "has_tests(feature)" and the task is about the login flow,',
+            'the goal predicate must be "has_tests(login)" — same predicate name, concrete argument.',
+            'Do NOT leave placeholder variable names such as "feature" or "object" in the goal.',
             'Reply with ONLY a JSON array, no prose: ["pred(...)", ...]',
         ].join('\n');
         try {
@@ -180,11 +184,14 @@ export function apply(ctx) {
     });
     def({
         name: 'grasp_retrieve',
-        description: 'Memory-conditioned skill retrieval (GraSP Eq.1/2): fuses direct semantic similarity with episodic memory, returns top-M skills, features and calibrated confidence.',
-        parameters: { task: { type: 'string', required: true } },
+        description: 'Memory-conditioned skill retrieval (GraSP Eq.1/2): fuses direct semantic similarity with episodic memory, returns top-M skills, features and calibrated confidence. Pass goal predicates to get a meaningful coverage feature — without them confidence is inflated.',
+        parameters: {
+            task: { type: 'string', required: true },
+            goal: { type: 'json', description: 'Goal predicates, e.g. ["clean(apple)"]. Improves coverage calibration.' },
+        },
         output: { schema: OUT, render: renderJson },
         async execute(args) {
-            return core.retrieveOnly(args.task);
+            return core.retrieveOnly(args.task, args.goal);
         },
     });
     def({

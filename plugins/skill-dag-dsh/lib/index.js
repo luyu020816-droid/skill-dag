@@ -463,7 +463,20 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 			reason: "no skill nodes",
 			rejected
 		};
-		const f = backwardFilter(nodes, goalList, initial);
+		const paramNames = /* @__PURE__ */ new Set();
+		skills.forEach((s) => (s.params || []).forEach((p) => paramNames.add(p)));
+		const normalizedGoal = goalList.map((g) => {
+			if (nodes.some((n) => n.effect.indexOf(g) >= 0)) return g;
+			const gp = parsePred(g);
+			if (!gp) return g;
+			for (const n of nodes) for (const e of n.effect) {
+				const ep = parsePred(e);
+				if (!ep || ep.name !== gp.name || ep.args.length !== gp.args.length) continue;
+				if (gp.args.every((a) => paramNames.has(a))) return e;
+			}
+			return g;
+		});
+		const f = backwardFilter(nodes, normalizedGoal, initial);
 		const keptCount = nodes.filter((n) => f.kept.has(n.id)).length;
 		nodes = nodes.filter((n) => f.kept.has(n.id));
 		if (!nodes.length) return {
@@ -500,7 +513,7 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 			skill: null,
 			name: "GOAL",
 			args: [],
-			precondition: goalList.slice(),
+			precondition: normalizedGoal.slice(),
 			effect: [],
 			status: "pending",
 			confidence: 1
@@ -529,7 +542,7 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 			if (e.from in hasOut) hasOut[e.from] = true;
 		});
 		nodes.forEach((n) => {
-			if (!hasOut[n.id] || n.effect.some((e) => goalList.indexOf(e) >= 0)) edges.push({
+			if (!hasOut[n.id] || n.effect.some((e) => normalizedGoal.indexOf(e) >= 0)) edges.push({
 				from: n.id,
 				to: "snk",
 				type: "order",
@@ -546,7 +559,7 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 			reason: "src to snk unreachable",
 			rejected
 		};
-		const uncovered = goalList.filter((g) => !(initial.indexOf(g) >= 0 || nodes.some((n) => n.effect.indexOf(g) >= 0)));
+		const uncovered = normalizedGoal.filter((g) => !(initial.indexOf(g) >= 0 || nodes.some((n) => n.effect.indexOf(g) >= 0)));
 		if (uncovered.length) return {
 			ok: false,
 			reason: "goal completeness failed: " + uncovered.join(", "),
@@ -564,7 +577,7 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 		const dag = {
 			planId,
 			task: task || "",
-			goal: goalList,
+			goal: normalizedGoal,
 			initial_conditions: initial,
 			nodes: all,
 			edges,
@@ -777,7 +790,11 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 				bounded: true
 			};
 		},
-		Rewire({ dag, node }) {
+		Rewire({ dag, node, event }) {
+			if (event && event.type === "precondition") {
+				const state = event.state || [];
+				if (node.precondition.filter((p) => state.indexOf(p) < 0 && (dag.initial_conditions || []).indexOf(p) < 0).length) return null;
+			}
 			const idx = dag.edges.findIndex((e) => e.to === node.id && e.type === "order");
 			if (idx < 0) return null;
 			dag.edges.splice(idx, 1);
@@ -937,12 +954,14 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 				};
 				return repairWith(deps, dag, event);
 			},
-			async retrieveOnly(task) {
+			async retrieveOnly(task, goal) {
+				const skills = await deps.skillSource.list();
+				const episodes = await deps.store.get("memory:episodes") || [];
 				return retrieve({
-					skills: await deps.skillSource.list(),
-					goal: [],
+					skills,
+					goal: goal || [],
 					task,
-					episodes: await deps.store.get("memory:episodes") || [],
+					episodes,
 					params
 				});
 			},
@@ -1046,6 +1065,65 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 				return null;
 			}
 		}
+		async function inferGraspBatch(items) {
+			if (!llmClient || !items.length) return {};
+			const prompt = [
+				"Annotate a set of agent skills for graph-based planning.",
+				"These skills will be compiled into a dependency DAG, so they MUST share one vocabulary.",
+				"",
+				"Skills:",
+				items.map((it, i) => i + 1 + ". " + it.name + "\n   description: " + (it.description || "(none)") + "\n   when to use: " + (it.whenToUse || "(none)")).join("\n"),
+				"",
+				"For EVERY skill infer:",
+				"- params: free variables it operates on",
+				"- precondition: predicates that must hold before running",
+				"- effect: predicates that become true after running",
+				"",
+				"CRITICAL RULES — the plan cannot compile unless you follow these:",
+				"1. Use ONE shared parameter name across all skills for the same kind of subject",
+				"   (e.g. always \"feature\", never a mix of \"feature\"/\"change\"/\"design\").",
+				"2. When skill B naturally runs after skill A, B.precondition MUST contain a",
+				"   predicate string that is CHARACTER-IDENTICAL to one in A.effect.",
+				"   Example of a correct chain:",
+				"     design:  precondition=[]                        effect=[\"has_design(feature)\"]",
+				"     build:   precondition=[\"has_design(feature)\"]   effect=[\"has_impl(feature)\"]",
+				"     test:    precondition=[\"has_impl(feature)\"]     effect=[\"has_tests(feature)\"]",
+				"3. Predicates are first-order atoms: lowercase_name(arg) or lowercase_name(arg1,arg2).",
+				"4. Prefer chaining skills through shared predicates over leaving preconditions empty.",
+				"",
+				"Reply with ONLY one JSON object keyed by skill name, no prose:",
+				"{\"<skill-name>\":{\"params\":[\"...\"],\"precondition\":[\"...\"],\"effect\":[\"...\"]}, ...}"
+			].join("\n");
+			try {
+				const raw = await llmClient.complete({
+					prompt,
+					temperature: 0
+				});
+				const m = /{[\s\S]*}/.exec(String(raw || ""));
+				if (!m) return {};
+				const obj = JSON.parse(m[0]);
+				const out = {};
+				for (const it of items) {
+					const g = obj[it.name];
+					if (!g) continue;
+					const pre = Array.isArray(g.precondition) ? g.precondition.map(String) : [];
+					const eff = Array.isArray(g.effect) ? g.effect.map(String) : [];
+					if (!pre.length && !eff.length) continue;
+					out[it.name] = {
+						name: it.name,
+						description: it.description,
+						params: Array.isArray(g.params) ? g.params.map(String) : [],
+						precondition: pre,
+						effect: eff,
+						args: [],
+						softVerify: void 0
+					};
+				}
+				return out;
+			} catch (e) {
+				return {};
+			}
+		}
 		async function load() {
 			if (!skillsApi) return [];
 			const scope = typeof o.getScope === "function" ? o.getScope() : void 0;
@@ -1058,36 +1136,54 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 			const out = [];
 			const skipped = [];
 			let inferred = 0;
+			const needInfer = [];
+			const resolved = [];
 			for (const item of listed) {
 				const full = await skillsApi.get(item.name, lookup) || item;
-				let g = extractGraspMeta(parseFrontmatter(full && full.content || "") || full);
-				if (!g && llmClient) {
-					const desc = full && full.description || "";
-					const wtu = full && full.whenToUse || "";
-					const inf = await inferGrasp(item.name, desc, wtu);
-					if (inf) {
-						g = inf;
-						inferred++;
-					}
-				}
-				if (!g) {
-					skipped.push({
-						name: item.name,
-						reason: "no grasp metadata"
-					});
-					continue;
-				}
-				out.push({
-					id: slug(item.name),
-					name: full && (full.name || full.title) || item.name,
+				const g = extractGraspMeta(parseFrontmatter(full && full.content || "") || full);
+				if (g) resolved.push({
+					item,
+					full,
+					g
+				});
+				else needInfer.push({
+					item,
+					full,
+					name: item.name,
 					description: full && full.description || "",
-					params: g.params || [],
-					precondition: g.precondition || [],
-					effect: g.effect || [],
-					args: g.args || [],
-					softVerify: g.softVerify !== false
+					whenToUse: full && full.whenToUse || ""
 				});
 			}
+			let batch = {};
+			if (needInfer.length && llmClient) batch = await inferGraspBatch(needInfer);
+			for (const n of needInfer) {
+				let g = batch[n.name];
+				if (!g && llmClient && Object.keys(batch).length === 0) {
+					const inf = await inferGrasp(n.name, n.description, n.whenToUse);
+					if (inf) g = inf;
+				}
+				if (g) {
+					resolved.push({
+						item: n.item,
+						full: n.full,
+						g
+					});
+					inferred++;
+				} else skipped.push({
+					name: n.item.name,
+					reason: "no grasp metadata"
+				});
+			}
+			for (const r of resolved) out.push({
+				id: slug(r.item.name),
+				name: r.full && (r.full.name || r.full.title) || r.item.name,
+				description: r.full && r.full.description || "",
+				params: r.g.params || [],
+				precondition: r.g.precondition || [],
+				effect: r.g.effect || [],
+				args: r.g.args || [],
+				softVerify: r.g.softVerify !== false
+			});
 			cache.val = out;
 			cache.at = Date.now();
 			cache.scope = scope;
@@ -1444,7 +1540,11 @@ function apply(ctx) {
 			"",
 			"A predicate is a first-order atom like \"clean(object)\".",
 			"Return the goal predicates that must be TRUE after the task completes.",
-			"Reuse the EXACT effect predicates from the list above (same strings), so the plan compiles.",
+			"Reuse the EXACT predicate NAMES and ARITY from the effects listed above.",
+			"But BIND the variables to concrete values taken from the task text.",
+			"Example: if a skill effect is \"has_tests(feature)\" and the task is about the login flow,",
+			"the goal predicate must be \"has_tests(login)\" — same predicate name, concrete argument.",
+			"Do NOT leave placeholder variable names such as \"feature\" or \"object\" in the goal.",
 			"Reply with ONLY a JSON array, no prose: [\"pred(...)\", ...]"
 		].join("\n");
 		try {
@@ -1610,17 +1710,23 @@ function apply(ctx) {
 	});
 	def({
 		name: "grasp_retrieve",
-		description: "Memory-conditioned skill retrieval (GraSP Eq.1/2): fuses direct semantic similarity with episodic memory, returns top-M skills, features and calibrated confidence.",
-		parameters: { task: {
-			type: "string",
-			required: true
-		} },
+		description: "Memory-conditioned skill retrieval (GraSP Eq.1/2): fuses direct semantic similarity with episodic memory, returns top-M skills, features and calibrated confidence. Pass goal predicates to get a meaningful coverage feature — without them confidence is inflated.",
+		parameters: {
+			task: {
+				type: "string",
+				required: true
+			},
+			goal: {
+				type: "json",
+				description: "Goal predicates, e.g. [\"clean(apple)\"]. Improves coverage calibration."
+			}
+		},
 		output: {
 			schema: OUT,
 			render: renderJson
 		},
 		async execute(args) {
-			return core.retrieveOnly(args.task);
+			return core.retrieveOnly(args.task, args.goal);
 		}
 	});
 	def({

@@ -121,10 +121,12 @@ async function main() {
   await core4.record({ task: APPLE.task, trajectory: ['find', 'open', 'pick', 'goto', 'clean', 'put'], success: true })
   const res4 = await core4.compile({ task: APPLE.task, goal: APPLE.manifest.goal, initialConditions: APPLE.manifest.initial_conditions, proposal: APPLE.proposal })
   const cAfter = res4.dag.routing.confidence
-  const cUnrelated = (await core4.retrieveOnly('unrelated cooking recipe')).confidence
-  console.log('    empty     = ' + cEmpty2.toFixed(4) + ' (expect ≈0.4831, boosted-repair)')
-  console.log('    after rec = ' + cAfter.toFixed(4) + ' (expect ≈0.9009, full-dag)  mode=' + res4.dag.routing.mode)
-  console.log('    unrelated = ' + cUnrelated.toFixed(4) + ' (expect ≈0.3248, react-fallback)')
+  check('c_ret empty ≈ 0.4831', cEmpty2.toFixed(4), '0.4831')
+  check('c_ret after record ≈ 0.9009', cAfter.toFixed(4), '0.9009')
+  check('c_ret after record → full-dag', res4.dag.routing.mode, 'full-dag')
+  const unrel = await core4.compile({ task: 'unrelated cooking recipe',
+    goal: APPLE.manifest.goal, initialConditions: APPLE.manifest.initial_conditions })
+  check('unrelated task → react-fallback (no DAG)', unrel.dag === null, true)
 
   console.log('\n[7] frontmatter extraction (with comma-inside-predicate bug check)')
   const fm = frontmatterSource([

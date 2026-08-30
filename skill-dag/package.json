@@ -18,7 +18,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/verify.js"
+    "test": "node test/verify.js",
+    "test:real": "node test/integration-real-skills.js",
+    "test:all": "npm test && npm run test:real"
   },
   "keywords": [
     "grasp",

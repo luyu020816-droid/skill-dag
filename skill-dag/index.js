@@ -319,7 +319,30 @@ async function compileWith(deps, { task, proposal, goal, initialConditions, orde
   let nodes = instantiate(skills, effectiveProposal, P)
   if (!nodes.length) return { ok: false, reason: 'no skill nodes', rejected }
 
-  const f = backwardFilter(nodes, goalList, initial)
+  // Fallback goal normalization: if a goal predicate still carries unbound
+  // parameter names (e.g. "has_tests(feature)") while nodes were bound to
+  // concrete values (e.g. "has_tests(login)"), rebind it to the node's
+  // concrete predicate. LLM goal inference may otherwise disagree with
+  // proposal binding and fail the completeness check below. Only triggers
+  // when EVERY goal argument is a known parameter name, so explicit goals
+  // are never rewritten.
+  const paramNames = new Set()
+  skills.forEach(s => (s.params || []).forEach(p => paramNames.add(p)))
+  const normalizedGoal = goalList.map(g => {
+    if (nodes.some(n => n.effect.indexOf(g) >= 0)) return g
+    const gp = parsePred(g)
+    if (!gp) return g
+    for (const n of nodes) {
+      for (const e of n.effect) {
+        const ep = parsePred(e)
+        if (!ep || ep.name !== gp.name || ep.args.length !== gp.args.length) continue
+        if (gp.args.every(a => paramNames.has(a))) return e
+      }
+    }
+    return g
+  })
+
+  const f = backwardFilter(nodes, normalizedGoal, initial)
   const keptCount = nodes.filter(n => f.kept.has(n.id)).length
   nodes = nodes.filter(n => f.kept.has(n.id))
   if (!nodes.length) return { ok: false, reason: 'goal unreachable: no skill covers goal', rejected }
@@ -334,7 +357,7 @@ async function compileWith(deps, { task, proposal, goal, initialConditions, orde
   })
 
   const src = { id: 'src', kind: 'src', skill: null, name: 'START', args: [], precondition: [], effect: initial.slice(), status: 'verified', confidence: 1 }
-  const snk = { id: 'snk', kind: 'snk', skill: null, name: 'GOAL', args: [], precondition: goalList.slice(), effect: [], status: 'pending', confidence: 1 }
+  const snk = { id: 'snk', kind: 'snk', skill: null, name: 'GOAL', args: [], precondition: normalizedGoal.slice(), effect: [], status: 'pending', confidence: 1 }
   const all = [src].concat(nodes).concat([snk])
 
   const hardIn = {}
@@ -345,14 +368,14 @@ async function compileWith(deps, { task, proposal, goal, initialConditions, orde
   nodes.forEach(n => { hasOut[n.id] = false })
   edges.forEach(e => { if (e.from in hasOut) hasOut[e.from] = true })
   nodes.forEach(n => {
-    if (!hasOut[n.id] || n.effect.some(e => goalList.indexOf(e) >= 0)) {
+    if (!hasOut[n.id] || n.effect.some(e => normalizedGoal.indexOf(e) >= 0)) {
       edges.push({ from: n.id, to: 'snk', type: 'order', label: 'goal' })
     }
   })
 
   if (hasCycle(all, edges)) return { ok: false, reason: 'cycle after structural edges', rejected }
   if (!reachable('src', 'snk', all, edges)) return { ok: false, reason: 'src to snk unreachable', rejected }
-  const uncovered = goalList.filter(g =>
+  const uncovered = normalizedGoal.filter(g =>
     !(initial.indexOf(g) >= 0 || nodes.some(n => n.effect.indexOf(g) >= 0)))
   if (uncovered.length) return { ok: false, reason: 'goal completeness failed: ' + uncovered.join(', '), rejected }
 
@@ -364,7 +387,7 @@ async function compileWith(deps, { task, proposal, goal, initialConditions, orde
   const planId = 'plan_' + (await nextSeq(store))
   const dag = {
     planId, task: task || '',
-    goal: goalList, initial_conditions: initial,
+    goal: normalizedGoal, initial_conditions: initial,
     nodes: all, edges, plan,
     routing: ret ? { confidence: ret.confidence, mode: ret.mode } : route(null, P),
     retrieval: ret ? { skills: ret.skills, features: ret.features } : null,
@@ -512,7 +535,17 @@ const BUILTIN_OPERATORS = {
     return { operator: 'Substitute', patch: { replacedWith: alt.id }, bounded: true }
   },
 
-  Rewire({ dag, node }) {
+  Rewire({ dag, node, event }) {
+    // Rewire only fixes redundant ORDER constraints; it cannot conjure up
+    // missing predicates. If the failure is a missing precondition, deleting
+    // an order edge helps nothing — yield to the other operators instead of
+    // burning the repair budget on a fake success.
+    if (event && event.type === 'precondition') {
+      const state = event.state || []
+      const missing = node.precondition.filter(p =>
+        state.indexOf(p) < 0 && (dag.initial_conditions || []).indexOf(p) < 0)
+      if (missing.length) return null
+    }
     const idx = dag.edges.findIndex(e => e.to === node.id && e.type === 'order')
     if (idx < 0) return null
     dag.edges.splice(idx, 1)
@@ -617,10 +650,10 @@ function createGraspCore(options) {
       if (!dag) return { ok: false, error: 'plan not found: ' + planId }
       return repairWith(deps, dag, event)
     },
-    async retrieveOnly(task) {
+    async retrieveOnly(task, goal) {
       const skills = await deps.skillSource.list()
       const episodes = (await deps.store.get('memory:episodes')) || []
-      return retrieve({ skills, goal: [], task, episodes, params })
+      return retrieve({ skills, goal: goal || [], task, episodes, params })
     },
     route(confidence) { return route(confidence, params) },
     async record({ task, trajectory, success }) {
@@ -700,6 +733,68 @@ function dshSkillsSource(skillsApi, opts) {
     }
   }
 
+  // Batch inference: all skills annotated in ONE prompt so they share a
+  // vocabulary and parameter names. Per-skill inference produces disjoint
+  // predicate sets (effect ∩ precondition = ∅), so the DAG gets zero
+  // state/data edges — this is the fix for that.
+  async function inferGraspBatch(items) {
+    if (!llmClient || !items.length) return {}
+    const catalog = items.map((it, i) =>
+      (i + 1) + '. ' + it.name +
+      '\n   description: ' + (it.description || '(none)') +
+      '\n   when to use: ' + (it.whenToUse || '(none)')
+    ).join('\n')
+    const prompt = [
+      'Annotate a set of agent skills for graph-based planning.',
+      'These skills will be compiled into a dependency DAG, so they MUST share one vocabulary.',
+      '',
+      'Skills:',
+      catalog,
+      '',
+      'For EVERY skill infer:',
+      '- params: free variables it operates on',
+      '- precondition: predicates that must hold before running',
+      '- effect: predicates that become true after running',
+      '',
+      'CRITICAL RULES — the plan cannot compile unless you follow these:',
+      '1. Use ONE shared parameter name across all skills for the same kind of subject',
+      '   (e.g. always "feature", never a mix of "feature"/"change"/"design").',
+      '2. When skill B naturally runs after skill A, B.precondition MUST contain a',
+      '   predicate string that is CHARACTER-IDENTICAL to one in A.effect.',
+      '   Example of a correct chain:',
+      '     design:  precondition=[]                        effect=["has_design(feature)"]',
+      '     build:   precondition=["has_design(feature)"]   effect=["has_impl(feature)"]',
+      '     test:    precondition=["has_impl(feature)"]     effect=["has_tests(feature)"]',
+      '3. Predicates are first-order atoms: lowercase_name(arg) or lowercase_name(arg1,arg2).',
+      '4. Prefer chaining skills through shared predicates over leaving preconditions empty.',
+      '',
+      'Reply with ONLY one JSON object keyed by skill name, no prose:',
+      '{"<skill-name>":{"params":["..."],"precondition":["..."],"effect":["..."]}, ...}'
+    ].join('\n')
+    try {
+      const raw = await llmClient.complete({ prompt, temperature: 0 })
+      const m = /{[\s\S]*}/.exec(String(raw || ''))
+      if (!m) return {}
+      const obj = JSON.parse(m[0])
+      const out = {}
+      for (const it of items) {
+        const g = obj[it.name]
+        if (!g) continue
+        const pre = Array.isArray(g.precondition) ? g.precondition.map(String) : []
+        const eff = Array.isArray(g.effect) ? g.effect.map(String) : []
+        if (!pre.length && !eff.length) continue
+        out[it.name] = {
+          name: it.name, description: it.description,
+          params: Array.isArray(g.params) ? g.params.map(String) : [],
+          precondition: pre, effect: eff, args: [], softVerify: undefined
+        }
+      }
+      return out
+    } catch (e) {
+      return {}
+    }
+  }
+
   async function load() {
     if (!skillsApi) return []
     const scope = (typeof o.getScope === 'function') ? o.getScope() : undefined
@@ -712,28 +807,56 @@ function dshSkillsSource(skillsApi, opts) {
     const out = []
     const skipped = []
     let inferred = 0
+
+    // Pass 1: read every skill; split into explicit-annotation vs need-inference.
+    const needInfer = []
+    const resolved = []
     for (const item of listed) {
       const full = (await skillsApi.get(item.name, lookup)) || item
       const content = (full && full.content) || ''
       const fm = parseFrontmatter(content)
-      // 1) explicit `grasp:` frontmatter wins; 2) else LLM inference; 3) else skip.
-      let g = extractGraspMeta(fm || full)
-      if (!g && llmClient) {
-        const desc = (full && full.description) || ''
-        const wtu = (full && full.whenToUse) || ''
-        const inf = await inferGrasp(item.name, desc, wtu)
-        if (inf) { g = inf; inferred++ }
+      // 1) explicit `grasp:` frontmatter wins; else it goes to batch inference.
+      const g = extractGraspMeta(fm || full)
+      if (g) {
+        resolved.push({ item, full, g })
+      } else {
+        needInfer.push({
+          item, full,
+          name: item.name,
+          description: (full && full.description) || '',
+          whenToUse: (full && full.whenToUse) || ''
+        })
       }
-      if (!g) { skipped.push({ name: item.name, reason: 'no grasp metadata' }); continue }
+    }
+
+    // Pass 2: ONE batch LLM call over all unannotated skills (shared vocabulary).
+    // If the batch call fails (returns {}), fall back to per-skill inference so
+    // a transient LLM hiccup doesn't drop every unannotated skill.
+    let batch = {}
+    if (needInfer.length && llmClient) {
+      batch = await inferGraspBatch(needInfer)
+    }
+    for (const n of needInfer) {
+      let g = batch[n.name]
+      if (!g && llmClient && Object.keys(batch).length === 0) {
+        const inf = await inferGrasp(n.name, n.description, n.whenToUse)
+        if (inf) g = inf
+      }
+      if (g) { resolved.push({ item: n.item, full: n.full, g }); inferred++ }
+      else { skipped.push({ name: n.item.name, reason: 'no grasp metadata' }) }
+    }
+
+    // Pass 3: unified output.
+    for (const r of resolved) {
       out.push({
-        id: slug(item.name),
-        name: (full && (full.name || full.title)) || item.name,
-        description: (full && full.description) || '',
-        params: g.params || [],
-        precondition: g.precondition || [],
-        effect: g.effect || [],
-        args: g.args || [],
-        softVerify: g.softVerify !== false
+        id: slug(r.item.name),
+        name: (r.full && (r.full.name || r.full.title)) || r.item.name,
+        description: (r.full && r.full.description) || '',
+        params: r.g.params || [],
+        precondition: r.g.precondition || [],
+        effect: r.g.effect || [],
+        args: r.g.args || [],
+        softVerify: r.g.softVerify !== false
       })
     }
     cache.val = out

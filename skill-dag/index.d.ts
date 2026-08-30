@@ -83,7 +83,7 @@ export interface GraspCore {
   compile(input: CompileInput): Promise<{ ok: boolean; dag?: Dag; reason?: string; routing?: Dag['routing']; rejected?: { skill: string; reason: string }[] }>
   verify(planId: string, nodeId: string, before?: string[], after?: string[]): Promise<Record<string, unknown>>
   repair(planId: string, event: { nodeId: string; type: string; message?: string; state?: string[] }): Promise<Record<string, unknown>>
-  retrieveOnly(task: string): Promise<Record<string, unknown>>
+  retrieveOnly(task: string, goal?: string[]): Promise<Record<string, unknown>>
   route(confidence: number): { confidence: number; mode: string }
   record(input: { task: string; trajectory?: string[]; success?: boolean }): Promise<{ recorded: boolean; memorySize: number }>
   getPlan(planId: string): Promise<Dag | null>
