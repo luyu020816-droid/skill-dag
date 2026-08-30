@@ -3,6 +3,7 @@
 url: https://github.com/luyu020816-droid/skill-dag/tree/main/plugins/skill-dag-dsh
 name: luyu020816-droid/skill-dag#skill-dag-dsh
 category: workflow
+tarball: https://github.com/luyu020816-droid/skill-dag/releases/latest/download/skill-dag-dsh-0.1.0.tgz
 description:
   en: Compiles agent skills into typed executable DAGs (state/data/order edges) with LLM-inferred predicates, node verification, bounded local repair, and confidence routing, and renders the plan as a draggable SVG in the tool card.
   zh: '把代理技能编译为类型化可执行 DAG（state/data/order 三类边），谓词由 LLM 联合推断、零手工标注，支持节点验证、有界局部修复与置信度路由，并在工具卡片中渲染为可拖拽 SVG。'
