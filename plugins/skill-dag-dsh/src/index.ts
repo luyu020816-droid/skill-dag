@@ -39,7 +39,7 @@ const APPLE = {
   ],
 }
 
-export function apply(ctx: Context): void {
+export async function apply(ctx: Context): Promise<void> {
   let currentScope: unknown = null
   let currentCwd: string | undefined
 
@@ -110,7 +110,31 @@ export function apply(ctx: Context): void {
     list(options?: { scope?: unknown; cwd?: string }): Promise<Array<{ name: string }>>
     get(name: string, options?: { scope?: unknown; cwd?: string }): Promise<unknown>
   } | undefined
-  const realSource = dshSkillsSource(skillsApi, { llmClient, getScope: () => currentScope, getCwd: () => currentCwd })
+
+  // ---- persistent skill library (execution spec stage A) ----
+  // Optional ctx.storageDomain: compiled (LLM-inferred) skill definitions are
+  // cached by content hash so a plugin reload does not re-run the LLM for
+  // unchanged skills. Absent storage → in-memory only (current behavior).
+  let persistStore: { get(key: string): Promise<unknown | null>; set(key: string, value: unknown): Promise<void> } | null = null
+  const storageDomain = ctx.get('storageDomain') as {
+    open(spec: unknown): Promise<{ table(name: string): { get(k: string): unknown; put(k: string, v: unknown): Promise<void> }; close(): Promise<void> }>
+  } | undefined
+  if (storageDomain) {
+    try {
+      const domain = await storageDomain.open({ name: 'grasp', version: 1, tables: { compiled: {} } })
+      const table = domain.table('compiled')
+      persistStore = {
+        get: async (key: string) => { try { return table.get(key) ?? null } catch { return null } },
+        set: async (key: string, value: unknown) => { try { await table.put(key, value) } catch { /* best-effort */ } },
+      }
+      ctx.effect(() => () => { try { void domain.close() } catch { /* ignore */ } })
+    } catch { persistStore = null }
+  }
+
+  const realSource = dshSkillsSource(skillsApi, {
+    llmClient, getScope: () => currentScope, getCwd: () => currentCwd,
+    persist: persistStore || undefined,
+  })
   const demoSource = manifestSource(APPLE.manifest)
   const skillSource = {
     list: async () => {

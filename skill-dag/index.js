@@ -693,6 +693,37 @@ function dshSkillsSource(skillsApi, opts) {
   const llmClient = o.llmClient || null
   const cache = { at: 0, val: null, skipped: [], inferred: 0, scope: undefined }
   const TTL = o.ttlMs || 5000
+  // Optional persistent store ({ get(key) -> value | null, set(key, value) -> Promise }).
+  // Compiled (LLM-inferred) skill definitions are cached by content hash so a
+  // restart does not re-run the LLM for unchanged skills (execution spec §9.1).
+  const persist = o.persist || null
+
+  // Stable, dependency-free content hash (FNV-1a 32-bit, hex).
+  function contentHash(text) {
+    let h = 0x811c9dc5
+    for (let i = 0; i < text.length; i++) {
+      h ^= text.charCodeAt(i)
+      h = (h * 0x01000193) >>> 0
+    }
+    return h.toString(16)
+  }
+
+  const persistKey = (name, hash) => 'grasp:compiled:' + name + ':' + hash
+
+  async function loadPersisted(name, hash) {
+    if (!persist) return null
+    try {
+      const raw = await persist.get(persistKey(name, hash))
+      return raw || null
+    } catch (e) {
+      return null
+    }
+  }
+
+  async function savePersisted(name, hash, g) {
+    if (!persist) return
+    try { await persist.set(persistKey(name, hash), g) } catch (e) { /* best-effort */ }
+  }
 
   // Infer `grasp:` predicates from a prose skill description via the LLM.
   async function inferGrasp(name, description, whenToUse) {
@@ -830,11 +861,25 @@ function dshSkillsSource(skillsApi, opts) {
     }
 
     // Pass 2: ONE batch LLM call over all unannotated skills (shared vocabulary).
-    // If the batch call fails (returns {}), fall back to per-skill inference so
-    // a transient LLM hiccup doesn't drop every unannotated skill.
+    // Persistent cache first: a skill whose content hash is unchanged reuses the
+    // previously compiled definition (no LLM call). Only genuinely new/changed
+    // skills go to the LLM, and their results are written back.
     let batch = {}
     if (needInfer.length && llmClient) {
-      batch = await inferGraspBatch(needInfer)
+      const fresh = []
+      for (const n of needInfer) {
+        const hash = contentHash((n.full && n.full.content) || n.name + n.description)
+        const cached = await loadPersisted(n.name, hash)
+        if (cached) { batch[n.name] = cached } else { fresh.push({ ...n, hash }) }
+      }
+      if (fresh.length) {
+        const inferredBatch = await inferGraspBatch(fresh)
+        for (const n of fresh) {
+          const g = inferredBatch[n.name]
+          if (g) await savePersisted(n.name, n.hash, g)
+        }
+        Object.assign(batch, inferredBatch)
+      }
     }
     for (const n of needInfer) {
       let g = batch[n.name]

@@ -28,7 +28,7 @@ const APPLE = {
         { skill: 'slice', args: ['apple'] },
     ],
 };
-export function apply(ctx) {
+export async function apply(ctx) {
     let currentScope = null;
     let currentCwd;
     // ---- real LLM: default model + streaming ----
@@ -98,7 +98,41 @@ export function apply(ctx) {
     }
     // ---- skill source: real session+workspace skills, demo fallback ----
     const skillsApi = ctx.get('skills');
-    const realSource = dshSkillsSource(skillsApi, { llmClient, getScope: () => currentScope, getCwd: () => currentCwd });
+    // ---- persistent skill library (execution spec stage A) ----
+    // Optional ctx.storageDomain: compiled (LLM-inferred) skill definitions are
+    // cached by content hash so a plugin reload does not re-run the LLM for
+    // unchanged skills. Absent storage → in-memory only (current behavior).
+    let persistStore = null;
+    const storageDomain = ctx.get('storageDomain');
+    if (storageDomain) {
+        try {
+            const domain = await storageDomain.open({ name: 'grasp', version: 1, tables: { compiled: {} } });
+            const table = domain.table('compiled');
+            persistStore = {
+                get: async (key) => { try {
+                    return table.get(key) ?? null;
+                }
+                catch {
+                    return null;
+                } },
+                set: async (key, value) => { try {
+                    await table.put(key, value);
+                }
+                catch { /* best-effort */ } },
+            };
+            ctx.effect(() => () => { try {
+                void domain.close();
+            }
+            catch { /* ignore */ } });
+        }
+        catch {
+            persistStore = null;
+        }
+    }
+    const realSource = dshSkillsSource(skillsApi, {
+        llmClient, getScope: () => currentScope, getCwd: () => currentCwd,
+        persist: persistStore || undefined,
+    });
     const demoSource = manifestSource(APPLE.manifest);
     const skillSource = {
         list: async () => {

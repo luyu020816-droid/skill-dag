@@ -20,7 +20,8 @@
   "scripts": {
     "test": "node test/verify.js",
     "test:real": "node test/integration-real-skills.js",
-    "test:all": "npm test && npm run test:real"
+    "test:stageA": "node test/stage-a-persistence.js",
+    "test:all": "npm test && npm run test:real && npm run test:stageA"
   },
   "keywords": [
     "grasp",

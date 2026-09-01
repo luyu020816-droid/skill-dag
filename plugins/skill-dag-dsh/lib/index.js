@@ -1025,6 +1025,30 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 			scope: void 0
 		};
 		const TTL = o.ttlMs || 5e3;
+		const persist = o.persist || null;
+		function contentHash(text) {
+			let h = 2166136261;
+			for (let i = 0; i < text.length; i++) {
+				h ^= text.charCodeAt(i);
+				h = h * 16777619 >>> 0;
+			}
+			return h.toString(16);
+		}
+		const persistKey = (name, hash) => "grasp:compiled:" + name + ":" + hash;
+		async function loadPersisted(name, hash) {
+			if (!persist) return null;
+			try {
+				return await persist.get(persistKey(name, hash)) || null;
+			} catch (e) {
+				return null;
+			}
+		}
+		async function savePersisted(name, hash, g) {
+			if (!persist) return;
+			try {
+				await persist.set(persistKey(name, hash), g);
+			} catch (e) {}
+		}
 		async function inferGrasp(name, description, whenToUse) {
 			if (!llmClient) return null;
 			const prompt = [
@@ -1155,7 +1179,26 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 				});
 			}
 			let batch = {};
-			if (needInfer.length && llmClient) batch = await inferGraspBatch(needInfer);
+			if (needInfer.length && llmClient) {
+				const fresh = [];
+				for (const n of needInfer) {
+					const hash = contentHash(n.full && n.full.content || n.name + n.description);
+					const cached = await loadPersisted(n.name, hash);
+					if (cached) batch[n.name] = cached;
+					else fresh.push({
+						...n,
+						hash
+					});
+				}
+				if (fresh.length) {
+					const inferredBatch = await inferGraspBatch(fresh);
+					for (const n of fresh) {
+						const g = inferredBatch[n.name];
+						if (g) await savePersisted(n.name, n.hash, g);
+					}
+					Object.assign(batch, inferredBatch);
+				}
+			}
 			for (const n of needInfer) {
 				let g = batch[n.name];
 				if (!g && llmClient && Object.keys(batch).length === 0) {
@@ -1498,7 +1541,7 @@ const APPLE = {
 		}
 	]
 };
-function apply(ctx) {
+async function apply(ctx) {
 	let currentScope = null;
 	let currentCwd;
 	const llm = ctx.get("llm");
@@ -1563,10 +1606,42 @@ function apply(ctx) {
 		}
 	}
 	const skillsApi = ctx.get("skills");
+	let persistStore = null;
+	const storageDomain = ctx.get("storageDomain");
+	if (storageDomain) try {
+		const domain = await storageDomain.open({
+			name: "grasp",
+			version: 1,
+			tables: { compiled: {} }
+		});
+		const table = domain.table("compiled");
+		persistStore = {
+			get: async (key) => {
+				try {
+					return table.get(key) ?? null;
+				} catch {
+					return null;
+				}
+			},
+			set: async (key, value) => {
+				try {
+					await table.put(key, value);
+				} catch {}
+			}
+		};
+		ctx.effect(() => () => {
+			try {
+				domain.close();
+			} catch {}
+		});
+	} catch {
+		persistStore = null;
+	}
 	const realSource = (0, import_skill_dag.dshSkillsSource)(skillsApi, {
 		llmClient,
 		getScope: () => currentScope,
-		getCwd: () => currentCwd
+		getCwd: () => currentCwd,
+		persist: persistStore || void 0
 	});
 	const demoSource = (0, import_skill_dag.manifestSource)(APPLE.manifest);
 	const skillSource = {
