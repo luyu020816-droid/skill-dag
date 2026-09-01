@@ -697,6 +697,8 @@ function dshSkillsSource(skillsApi, opts) {
   // Compiled (LLM-inferred) skill definitions are cached by content hash so a
   // restart does not re-run the LLM for unchanged skills (execution spec §9.1).
   const persist = o.persist || null
+  // Optional signal accessor: lets a running tool cancel LLM inference.
+  const getSignal = (typeof o.getSignal === 'function') ? o.getSignal : () => undefined
 
   // Stable, dependency-free content hash (FNV-1a 32-bit, hex).
   function contentHash(text) {
@@ -743,7 +745,7 @@ function dshSkillsSource(skillsApi, opts) {
       '{"params":["..."],"precondition":["..."],"effect":["..."]}'
     ].join('\n')
     try {
-      const raw = await llmClient.complete({ prompt, temperature: 0 })
+      const raw = await llmClient.complete({ prompt, temperature: 0, signal: getSignal() })
       const m = /{[\s\S]*}/.exec(String(raw || ''))
       if (!m) return null
       const obj = JSON.parse(m[0])
@@ -768,12 +770,20 @@ function dshSkillsSource(skillsApi, opts) {
   // vocabulary and parameter names. Per-skill inference produces disjoint
   // predicate sets (effect ∩ precondition = ∅), so the DAG gets zero
   // state/data edges — this is the fix for that.
+  // Guarded: a very large library (e.g. 49 skills) would produce a prompt too
+  // big for one LLM call. Cap the batch and truncate descriptions; the rest
+  // falls back to per-skill inference below (still sharing no vocabulary, but
+  // never hangs or times out).
+  const MAX_BATCH = 24
+  const MAX_DESC = 200
+
   async function inferGraspBatch(items) {
     if (!llmClient || !items.length) return {}
-    const catalog = items.map((it, i) =>
+    const batched = items.slice(0, MAX_BATCH)
+    const catalog = batched.map((it, i) =>
       (i + 1) + '. ' + it.name +
-      '\n   description: ' + (it.description || '(none)') +
-      '\n   when to use: ' + (it.whenToUse || '(none)')
+      '\n   description: ' + String(it.description || '(none)').slice(0, MAX_DESC) +
+      '\n   when to use: ' + String(it.whenToUse || '(none)').slice(0, MAX_DESC)
     ).join('\n')
     const prompt = [
       'Annotate a set of agent skills for graph-based planning.',
@@ -803,7 +813,7 @@ function dshSkillsSource(skillsApi, opts) {
       '{"<skill-name>":{"params":["..."],"precondition":["..."],"effect":["..."]}, ...}'
     ].join('\n')
     try {
-      const raw = await llmClient.complete({ prompt, temperature: 0 })
+      const raw = await llmClient.complete({ prompt, temperature: 0, signal: getSignal() })
       const m = /{[\s\S]*}/.exec(String(raw || ''))
       if (!m) return {}
       const obj = JSON.parse(m[0])
@@ -864,6 +874,8 @@ function dshSkillsSource(skillsApi, opts) {
     // Persistent cache first: a skill whose content hash is unchanged reuses the
     // previously compiled definition (no LLM call). Only genuinely new/changed
     // skills go to the LLM, and their results are written back.
+    // Hard cap on per-call inference: a 49-skill library must not stall the tool
+    // for minutes. Skills beyond the batch cap fall back to per-skill inference.
     let batch = {}
     if (needInfer.length && llmClient) {
       const fresh = []
@@ -879,6 +891,12 @@ function dshSkillsSource(skillsApi, opts) {
           if (g) await savePersisted(n.name, n.hash, g)
         }
         Object.assign(batch, inferredBatch)
+      }
+      // Skills outside the batch cap: single-skill inference (bounded).
+      const uncovered = needInfer.filter(n => !batch[n.name])
+      for (const n of uncovered) {
+        const inf = await inferGrasp(n.name, n.description, n.whenToUse)
+        if (inf) { batch[n.name] = inf; inferred++ }
       }
     }
     for (const n of needInfer) {

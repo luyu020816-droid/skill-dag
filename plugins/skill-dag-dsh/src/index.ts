@@ -42,16 +42,20 @@ const APPLE = {
 export async function apply(ctx: Context): Promise<void> {
   let currentScope: unknown = null
   let currentCwd: string | undefined
+  let currentSignal: AbortSignal | undefined
 
   // ---- real LLM: default model + streaming ----
   const llm = ctx.get('llm') as { stream(options: unknown): AsyncIterable<{ type: string; text?: string }> } | undefined
   const defaultModel = ctx.get('agentDefaultModel') as { currentSelection(): { provider: string; model: string } } | undefined
-  let llmClient: { complete(input: { prompt: string; temperature?: number }): Promise<string> } | null = null
+  // Hard cap per LLM completion so a huge skill library or a slow model cannot
+  // stall the tool for minutes; cancellation is still cooperative via signal.
+  const LLM_TIMEOUT_MS = 30000
+  let llmClient: { complete(input: { prompt: string; temperature?: number; signal?: AbortSignal }): Promise<string> } | null = null
   if (llm && defaultModel) {
     const sel = defaultModel.currentSelection()
     if (sel && sel.provider && sel.model) {
       llmClient = {
-        async complete({ prompt, temperature }) {
+        async complete({ prompt, temperature, signal }) {
           const messages = [{
             id: 'grasp-' + Date.now() + '-' + Math.random().toString(36).slice(2),
             role: 'user',
@@ -59,12 +63,15 @@ export async function apply(ctx: Context): Promise<void> {
             source: { kind: 'plugin', plugin: 'skill-dag-dsh' },
           }]
           let text = ''
+          const deadline = Date.now() + LLM_TIMEOUT_MS
           for await (const chunk of llm.stream({
             provider: sel.provider,
             model: sel.model,
             messages,
             temperature: typeof temperature === 'number' ? temperature : 0,
           })) {
+            if (signal && signal.aborted) throw new Error('grasp llm aborted')
+            if (Date.now() > deadline) throw new Error('grasp llm timeout after ' + LLM_TIMEOUT_MS + 'ms')
             if (chunk.type === 'text-delta' && chunk.text) text += chunk.text
           }
           return text
@@ -133,6 +140,7 @@ export async function apply(ctx: Context): Promise<void> {
 
   const realSource = dshSkillsSource(skillsApi, {
     llmClient, getScope: () => currentScope, getCwd: () => currentCwd,
+    getSignal: () => currentSignal,
     persist: persistStore || undefined,
   })
   const demoSource = manifestSource(APPLE.manifest)
@@ -168,9 +176,10 @@ export async function apply(ctx: Context): Promise<void> {
     description: 'Compile a natural-language task into a DAG against the real skill library (session + workspace skills): jointly infer skill predicates with a shared vocabulary, infer the goal reusing those effects, retrieve, propose with the LLM (binding args to match the goal), and compile. No manual annotation required.',
     parameters: { task: { type: 'string', required: true, description: 'Natural-language task to compile into a DAG.' } },
     output: { schema: OUT, render: renderJson },
-    async execute(args: { task: string }, exec: { agent?: { session?: { header?: { cwd?: string } } } }) {
+    async execute(args: { task: string }, exec: { agent?: { session?: { header?: { cwd?: string } } }; signal?: AbortSignal }) {
       currentScope = (exec && exec.agent) || null
       currentCwd = (exec && exec.agent && exec.agent.session && exec.agent.session.header && exec.agent.session.header.cwd) || undefined
+      currentSignal = (exec && exec.signal) || undefined
       const skills = await skillSource.list()
       if (!skills.length) return { ok: false, reason: 'no skills available' }
       const goal = await inferGoal(args.task, skills)
@@ -189,9 +198,10 @@ export async function apply(ctx: Context): Promise<void> {
       proposal: { type: 'json', description: 'Optional explicit node proposals [{skill, args}].' },
     },
     output: { schema: OUT, render: renderJson },
-    async execute(args: Record<string, unknown>, exec: { agent?: { session?: { header?: { cwd?: string } } } }) {
+    async execute(args: Record<string, unknown>, exec: { agent?: { session?: { header?: { cwd?: string } } }; signal?: AbortSignal }) {
       currentScope = (exec && exec.agent) || null
       currentCwd = (exec && exec.agent && exec.agent.session && exec.agent.session.header && exec.agent.session.header.cwd) || undefined
+      currentSignal = (exec && exec.signal) || undefined
       return core.compile((args as never) || {})
     },
   })

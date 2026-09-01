@@ -31,15 +31,19 @@ const APPLE = {
 export async function apply(ctx) {
     let currentScope = null;
     let currentCwd;
+    let currentSignal;
     // ---- real LLM: default model + streaming ----
     const llm = ctx.get('llm');
     const defaultModel = ctx.get('agentDefaultModel');
+    // Hard cap per LLM completion so a huge skill library or a slow model cannot
+    // stall the tool for minutes; cancellation is still cooperative via signal.
+    const LLM_TIMEOUT_MS = 30000;
     let llmClient = null;
     if (llm && defaultModel) {
         const sel = defaultModel.currentSelection();
         if (sel && sel.provider && sel.model) {
             llmClient = {
-                async complete({ prompt, temperature }) {
+                async complete({ prompt, temperature, signal }) {
                     const messages = [{
                             id: 'grasp-' + Date.now() + '-' + Math.random().toString(36).slice(2),
                             role: 'user',
@@ -47,12 +51,17 @@ export async function apply(ctx) {
                             source: { kind: 'plugin', plugin: 'skill-dag-dsh' },
                         }];
                     let text = '';
+                    const deadline = Date.now() + LLM_TIMEOUT_MS;
                     for await (const chunk of llm.stream({
                         provider: sel.provider,
                         model: sel.model,
                         messages,
                         temperature: typeof temperature === 'number' ? temperature : 0,
                     })) {
+                        if (signal && signal.aborted)
+                            throw new Error('grasp llm aborted');
+                        if (Date.now() > deadline)
+                            throw new Error('grasp llm timeout after ' + LLM_TIMEOUT_MS + 'ms');
                         if (chunk.type === 'text-delta' && chunk.text)
                             text += chunk.text;
                     }
@@ -131,6 +140,7 @@ export async function apply(ctx) {
     }
     const realSource = dshSkillsSource(skillsApi, {
         llmClient, getScope: () => currentScope, getCwd: () => currentCwd,
+        getSignal: () => currentSignal,
         persist: persistStore || undefined,
     });
     const demoSource = manifestSource(APPLE.manifest);
@@ -165,6 +175,7 @@ export async function apply(ctx) {
         async execute(args, exec) {
             currentScope = (exec && exec.agent) || null;
             currentCwd = (exec && exec.agent && exec.agent.session && exec.agent.session.header && exec.agent.session.header.cwd) || undefined;
+            currentSignal = (exec && exec.signal) || undefined;
             const skills = await skillSource.list();
             if (!skills.length)
                 return { ok: false, reason: 'no skills available' };
@@ -187,6 +198,7 @@ export async function apply(ctx) {
         async execute(args, exec) {
             currentScope = (exec && exec.agent) || null;
             currentCwd = (exec && exec.agent && exec.agent.session && exec.agent.session.header && exec.agent.session.header.cwd) || undefined;
+            currentSignal = (exec && exec.signal) || undefined;
             return core.compile(args || {});
         },
     });

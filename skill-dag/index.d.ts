@@ -102,7 +102,7 @@ export interface CreateGraspCoreOptions {
 export function createGraspCore(options: CreateGraspCoreOptions): GraspCore
 export function memoryStore(): Store
 export function manifestSource(manifest: { skills: Skill[]; goal?: string[]; initial_conditions?: string[] }): SkillSource
-export function dshSkillsSource(skillsApi: unknown, opts?: { llmClient?: unknown; getScope?: () => unknown; getCwd?: () => string | undefined; ttlMs?: number; persist?: { get(key: string): Promise<unknown | null>; set(key: string, value: unknown): Promise<void> } }): SkillSource
+export function dshSkillsSource(skillsApi: unknown, opts?: { llmClient?: unknown; getScope?: () => unknown; getCwd?: () => string | undefined; getSignal?: () => AbortSignal | undefined; ttlMs?: number; persist?: { get(key: string): Promise<unknown | null>; set(key: string, value: unknown): Promise<void> } }): SkillSource
 export function frontmatterSource(files: { name: string; content: string }[]): SkillSource
 export function createProposer(kind: 'explicit' | 'retrieval' | 'llm', opts?: Record<string, unknown>): Proposer
 export function kvStore(storage: Record<string, unknown>, prefix?: string): Store
