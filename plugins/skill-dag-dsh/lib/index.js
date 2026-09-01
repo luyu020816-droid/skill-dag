@@ -1397,6 +1397,7 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 })))();
 const name = "grasp";
 const inject = [
+	"tools",
 	"llm",
 	"skills",
 	"agents",

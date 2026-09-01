@@ -10,7 +10,7 @@ import {
 } from 'skill-dag'
 
 export const name = 'grasp'
-export const inject = ['llm', 'skills', 'agents', 'agentDefaultModel']
+export const inject = ['tools', 'llm', 'skills', 'agents', 'agentDefaultModel']
 
 const APPLE = {
   task: 'clean an apple and put it on the countertop',
