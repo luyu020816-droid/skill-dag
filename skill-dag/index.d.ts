@@ -110,6 +110,50 @@ export function parseFrontmatter(text: string): Record<string, unknown> | null
 export function parseInlineArray(inner: string): string[]
 export function extractGraspMeta(obj: Record<string, unknown>): Record<string, unknown> | null
 export function slug(s: string): string
+export function stableIdempotencyKey(planId: string, nodeId: string, attempt: number): string
+export type NodeStatus = 'pending' | 'ready' | 'running' | 'verifying' | 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'outcome-unknown'
+export type PlanStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export interface ExecutionNode {
+  id: string
+  skillId: string
+  args: string[]
+  preconditions: string[]
+  expectedEffects: string[]
+  status: NodeStatus
+  attempt: number
+  idempotencyKey: string | null
+  evidence: unknown[]
+  output: unknown
+  failure: { type: string; message: string; state?: string[] } | null
+}
+export interface ExecutionPlan {
+  id: string
+  version: number
+  task: string
+  status: PlanStatus
+  nodes: Record<string, ExecutionNode>
+  edges: { from: string; to: string; type: string; label?: string }[]
+  createdAt: string
+  updatedAt: string
+}
+export interface ExecutorDeps {
+  execute(node: { node: ExecutionNode; plan: ExecutionPlan; idempotencyKey: string }, ctx: unknown): Promise<{ output?: unknown; evidence?: unknown[]; error?: string }>
+  verify?(req: { plan: ExecutionPlan; node: ExecutionNode; output: unknown }): Promise<{ passed: boolean; observedEffects?: string[]; evidence?: unknown[]; reason?: string }>
+  persist?(plan: ExecutionPlan): Promise<void>
+  params?: { rMax?: number; timeoutMs?: number }
+}
+export interface Executor {
+  makeExecutionPlan(compiled: { nodes?: unknown[]; edges?: unknown[]; task?: string }, id: string, version?: number): ExecutionPlan
+  run(plan: ExecutionPlan, ctx?: unknown): Promise<ExecutionPlan>
+  cancel(plan: ExecutionPlan, ctx?: unknown): Promise<ExecutionPlan>
+  resume(plan: ExecutionPlan, ctx?: unknown): Promise<ExecutionPlan>
+  snapshot(plan: ExecutionPlan): ExecutionPlan
+  readyNodes(plan: ExecutionPlan): string[]
+  isGoalReached(plan: ExecutionPlan): boolean
+  NODE_STATUSES: string[]
+  PLAN_STATUSES: string[]
+}
+export function createExecutor(deps: ExecutorDeps): Executor
 export const DEFAULT_PARAMS: Record<string, unknown>
 export const BUILTIN_OPERATORS: Record<string, (ctx: Record<string, unknown>) => unknown>
 export const DEFAULT_ORDER: Record<string, string[]>

@@ -21,7 +21,8 @@
     "test": "node test/verify.js",
     "test:real": "node test/integration-real-skills.js",
     "test:stageA": "node test/stage-a-persistence.js",
-    "test:all": "npm test && npm run test:real && npm run test:stageA"
+    "test:stageB": "node test/stage-b-executor.js",
+    "test:all": "npm test && npm run test:real && npm run test:stageA && npm run test:stageB"
   },
   "keywords": [
     "grasp",

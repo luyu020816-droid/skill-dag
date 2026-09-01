@@ -6,7 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   createGraspCore, memoryStore, manifestSource, dshSkillsSource,
-  createProposer,
+  createProposer, createExecutor,
 } from 'skill-dag'
 
 export const name = 'grasp'
@@ -262,11 +262,129 @@ export async function apply(ctx: Context): Promise<void> {
         skipped: skillSource.skipped(),
         inferred: skillSource.inferred(),
         hasLLM: !!llmClient,
-        persistent: false,
+        persistent: !!persistStore,
         params: core.params,
       }
     },
   })
 
-  console.log('[grasp] host wired: llm=' + (llmClient ? 'on' : 'off') + ' skills=session+workspace')
+  // ---- execution layer (spec §13, §19): scheduler + subagent executor ----
+  // Plan registry: in-memory map keyed by planId; plans also flow through the
+  // core store so grasp_status can list them. Persistence to storageDomain is
+  // wired for the compiled skill library (stage A); plan persistence (stage D)
+  // will extend the same domain.
+  const plans = new Map<string, unknown>()
+
+  const coreStoreSet = async (id: string, plan: unknown) => {
+    // Reuse the core store namespace for plan snapshots: plan:<id>.
+    const inner = ctx.get('storage') as { set(key: string, value: unknown): Promise<void> } | undefined
+    if (inner) await inner.set('grasp:plan:' + id, JSON.stringify(plan))
+  }
+
+  const subagents = ctx.get('subagents') as {
+    start(request: {
+      prompt: unknown[]; parent: unknown; signal: AbortSignal; agentOptions?: unknown
+    }): Promise<{ result: Promise<{ output: unknown; structured?: unknown; stopReason: string; diagnostic?: string }> }>
+  } | undefined
+
+  const executor = createExecutor({
+    params: { rMax: 2 },
+    // AgentSkillExecutor (spec §13): load the skill body, compose a
+    // self-contained child prompt, delegate via ctx.subagents.start (spawn).
+    execute: async ({ node, plan }, runCtx: { agent?: unknown; signal?: AbortSignal }) => {
+      if (!subagents || !runCtx || !runCtx.agent) {
+        return { error: 'subagents service or parent agent unavailable (execution requires a live session)' }
+      }
+      const skill = await skillSource.get(node.skillId)
+      if (!skill) return { error: 'skill not found: ' + node.skillId }
+      const body = (skill as { content?: string }).content || ''
+      const promptText = [
+        'Execute this skill for a planned DAG node.',
+        '',
+        'Skill: ' + (skill as { name?: string }).name || node.skillId,
+        'Arguments: ' + JSON.stringify(node.args),
+        'Expected effects (verify these hold): ' + JSON.stringify(node.expectedEffects),
+        '',
+        'Skill instructions:',
+        body,
+        '',
+        'Follow the skill instructions exactly. Report what you did and whether the expected effects hold.',
+      ].join('\n')
+      const run = await subagents.start({
+        prompt: [{ type: 'text', text: promptText }],
+        parent: runCtx.agent,
+        signal: (runCtx.signal as AbortSignal) || new AbortController().signal,
+      })
+      const res = await run.result
+      const text = Array.isArray(res.output) ? res.output.map((b: { text?: string }) => b.text || '').join('') : String(res.output || '')
+      if (res.stopReason !== 'completed') {
+        return { error: 'child stopped: ' + res.stopReason + (res.diagnostic ? ' — ' + res.diagnostic : '') }
+      }
+      return { output: { text, structured: res.structured || null }, evidence: [{ kind: 'subagent', stopReason: res.stopReason }] }
+    },
+    persist: async (plan: never) => {
+      plans.set((plan as { id: string }).id, plan)
+      try { await coreStoreSet((plan as { id: string }).id, plan) } catch { /* memory fallback */ }
+    },
+  })
+
+  def({
+    name: 'grasp_run',
+    description: 'Execute a compiled plan: the scheduler serially runs each ready node (skill → subagent), verifies effects, blocks successors of failed nodes, and persists every state change. Pass a planId from grasp_compile_task output.',
+    parameters: { planId: { type: 'string', required: true, description: 'Plan id returned by grasp_compile_task / grasp_compile.' } },
+    output: { schema: OUT, render: renderJson },
+    async execute(args: { planId: string }, exec: { agent?: unknown }) {
+      const dag = await core.getPlan(args.planId)
+      if (!dag) return { ok: false, error: 'plan not found: ' + args.planId }
+      // Reuse the compiled DAG structure to build an execution plan.
+      const plan = executor.makeExecutionPlan({
+        task: (dag as { task?: string }).task,
+        nodes: (dag as { nodes?: unknown[] }).nodes,
+        edges: (dag as { edges?: unknown[] }).edges,
+      }, args.planId, 1)
+      plans.set(args.planId, plan)
+      const snap = await executor.run(plan, { agent: exec && exec.agent })
+      return { ok: true, snapshot: snap }
+    },
+  })
+
+  def({
+    name: 'grasp_status_plan',
+    description: 'Report the current snapshot of one execution plan: node statuses, attempts, evidence, outputs, and plan status.',
+    parameters: { planId: { type: 'string', required: true } },
+    output: { schema: OUT, render: renderJson },
+    async execute(args: { planId: string }) {
+      const plan = plans.get(args.planId)
+      if (!plan) return { ok: false, error: 'plan not found: ' + args.planId }
+      return { ok: true, snapshot: executor.snapshot(plan as never) }
+    },
+  })
+
+  def({
+    name: 'grasp_cancel',
+    description: 'Cancel a running plan: propagate cancellation to the active subagent, mark pending/ready nodes cancelled, persist the cancellation. The plan and its history remain for inspection or resume.',
+    parameters: { planId: { type: 'string', required: true } },
+    output: { schema: OUT, render: renderJson },
+    async execute(args: { planId: string }) {
+      const plan = plans.get(args.planId)
+      if (!plan) return { ok: false, error: 'plan not found: ' + args.planId }
+      const snap = await executor.cancel(plan as never)
+      return { ok: true, snapshot: snap }
+    },
+  })
+
+  def({
+    name: 'grasp_resume',
+    description: 'Resume a previously cancelled or failed plan from its persisted state: re-run ready nodes, continue the serial schedule.',
+    parameters: { planId: { type: 'string', required: true } },
+    output: { schema: OUT, render: renderJson },
+    async execute(args: { planId: string }, exec: { agent?: unknown }) {
+      const plan = plans.get(args.planId)
+      if (!plan) return { ok: false, error: 'plan not found: ' + args.planId }
+      const snap = await executor.resume(plan as never, { agent: exec && exec.agent })
+      return { ok: true, snapshot: snap }
+    },
+  })
+
+  console.log('[grasp] host wired: llm=' + (llmClient ? 'on' : 'off') + ' skills=session+workspace executor=' + (subagents ? 'on' : 'off'))
 }

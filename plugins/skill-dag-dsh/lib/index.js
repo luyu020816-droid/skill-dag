@@ -1421,6 +1421,297 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 			}
 		};
 	}
+	const NODE_STATUSES = [
+		"pending",
+		"ready",
+		"running",
+		"verifying",
+		"succeeded",
+		"failed",
+		"blocked",
+		"cancelled",
+		"outcome-unknown"
+	];
+	const PLAN_STATUSES = [
+		"pending",
+		"running",
+		"succeeded",
+		"failed",
+		"cancelled"
+	];
+	const NODE_TRANSITIONS = {
+		pending: [
+			"ready",
+			"blocked",
+			"cancelled"
+		],
+		ready: ["running", "cancelled"],
+		running: [
+			"verifying",
+			"failed",
+			"outcome-unknown",
+			"cancelled"
+		],
+		verifying: [
+			"succeeded",
+			"failed",
+			"outcome-unknown",
+			"cancelled"
+		],
+		succeeded: [],
+		failed: ["ready"],
+		blocked: ["ready", "cancelled"],
+		cancelled: [],
+		"outcome-unknown": ["ready"]
+	};
+	function assertTransition(nodeId, from, to) {
+		const allowed = NODE_TRANSITIONS[from];
+		if (!allowed || allowed.indexOf(to) < 0) throw new Error("invalid node transition " + from + " -> " + to + " (node " + nodeId + ")");
+	}
+	function stableIdempotencyKey(planId, nodeId, attempt) {
+		return "grasp:idem:" + planId + ":" + nodeId + ":" + attempt;
+	}
+	function makeExecutionPlan(compiled, id, version) {
+		const now = (/* @__PURE__ */ new Date()).toISOString();
+		const nodes = {};
+		const edges = compiled && compiled.edges || [];
+		(compiled && compiled.nodes || []).forEach((n, i) => {
+			const nid = n.id || "n" + (i + 1);
+			nodes[nid] = {
+				id: nid,
+				skillId: n.skill,
+				args: (n.args || []).slice(),
+				preconditions: (n.precondition || []).slice(),
+				expectedEffects: (n.effect || []).slice(),
+				status: "pending",
+				attempt: 0,
+				idempotencyKey: null,
+				evidence: [],
+				output: null,
+				failure: null
+			};
+		});
+		return {
+			id,
+			version: version || 1,
+			task: compiled && compiled.task || "",
+			status: "pending",
+			nodes,
+			edges: edges.map((e) => ({
+				from: e.from,
+				to: e.to,
+				type: e.type,
+				label: e.label
+			})),
+			createdAt: now,
+			updatedAt: now
+		};
+	}
+	function planSnapshot(plan) {
+		return {
+			id: plan.id,
+			version: plan.version,
+			task: plan.task,
+			status: plan.status,
+			nodes: Object.fromEntries(Object.entries(plan.nodes).map(([k, n]) => [k, {
+				id: n.id,
+				skillId: n.skillId,
+				args: n.args,
+				preconditions: n.preconditions,
+				expectedEffects: n.expectedEffects,
+				status: n.status,
+				attempt: n.attempt,
+				idempotencyKey: n.idempotencyKey,
+				evidence: n.evidence,
+				output: n.output,
+				failure: n.failure
+			}])),
+			edges: plan.edges,
+			createdAt: plan.createdAt,
+			updatedAt: plan.updatedAt
+		};
+	}
+	function readyNodes(plan) {
+		const preds = {};
+		plan.edges.forEach((e) => {
+			(preds[e.to] = preds[e.to] || []).push(e.from);
+		});
+		return Object.keys(plan.nodes).filter((id) => {
+			const n = plan.nodes[id];
+			if (n.status !== "pending" && n.status !== "ready") return false;
+			return (preds[id] || []).every((d) => {
+				const dn = plan.nodes[d];
+				return dn && dn.status === "succeeded";
+			});
+		});
+	}
+	function isGoalReached(plan) {
+		const hasOut = {};
+		plan.edges.forEach((e) => {
+			hasOut[e.from] = true;
+		});
+		const goalNodes = Object.keys(plan.nodes).filter((id) => !hasOut[id]);
+		return goalNodes.length > 0 && goalNodes.every((id) => plan.nodes[id].status === "succeeded");
+	}
+	function blockDescendants(plan, failedId) {
+		const adj = {};
+		plan.edges.forEach((e) => {
+			(adj[e.from] = adj[e.from] || []).push(e.to);
+		});
+		const stack = [failedId];
+		const visited = /* @__PURE__ */ new Set();
+		while (stack.length) {
+			const cur = stack.pop();
+			if (visited.has(cur)) continue;
+			visited.add(cur);
+			const n = plan.nodes[cur];
+			if (n && (n.status === "pending" || n.status === "ready")) n.status = "blocked";
+			(adj[cur] || []).forEach((t) => stack.push(t));
+		}
+	}
+	async function verifyNodeResult(plan, node, verifier, executorResult) {
+		if (verifier) return verifier({
+			plan,
+			node,
+			output: executorResult
+		});
+		const passed = !executorResult.error;
+		return {
+			passed,
+			observedEffects: passed ? node.expectedEffects.slice() : [],
+			evidence: [],
+			reason: passed ? void 0 : String(executorResult.error || "executor failed")
+		};
+	}
+	/**
+	* Create a plan executor. Pure core: the scheduler owns every node transition;
+	* executors and verifiers are injected by the host adapter and only RETURN
+	* results — they never write node status (spec §12, §24.3).
+	*
+	* @param {object} deps
+	* @param {Function} deps.execute   - (node, ctx) => Promise<{output?, error?}>; one node -> one execution
+	* @param {Function} [deps.verify]  - (req) => Promise<{passed, observedEffects?, evidence?, reason?}>
+	* @param {Function} [deps.persist] - (plan) => Promise<void>; durable write after every state change
+	* @param {object}  [deps.params]   - { rMax?, timeoutMs? }
+	*/
+	function createExecutor(deps) {
+		const execute = deps.execute;
+		if (typeof execute !== "function") throw new Error("createExecutor: execute is required");
+		const verify = deps.verify || null;
+		const persist = deps.persist || null;
+		const rMax = (deps.params || {}).rMax || 2;
+		async function commit(plan) {
+			plan.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+			if (persist) await persist(plan);
+		}
+		async function setNode(plan, node, to) {
+			assertTransition(node.id, node.status, to);
+			node.status = to;
+			if (to === "running") {
+				node.attempt++;
+				node.idempotencyKey = stableIdempotencyKey(plan.id, node.id, node.attempt);
+			}
+			await commit(plan);
+		}
+		async function runNode(plan, node, runCtx) {
+			await setNode(plan, node, "running");
+			let result;
+			try {
+				result = await execute({
+					node,
+					plan,
+					idempotencyKey: node.idempotencyKey
+				}, runCtx);
+			} catch (e) {
+				result = { error: String(e && e.message || e) };
+			}
+			node.output = result && "output" in result ? result.output : null;
+			if (result && Array.isArray(result.evidence)) node.evidence = result.evidence;
+			await commit(plan);
+			await setNode(plan, node, "verifying");
+			const verdict = await verifyNodeResult(plan, node, verify, result || {});
+			node.evidence = node.evidence.concat(verdict.evidence || []);
+			if (verdict.passed) {
+				await setNode(plan, node, "succeeded");
+				return {
+					node,
+					ok: true
+				};
+			}
+			node.failure = {
+				type: "verification",
+				message: verdict.reason || "verification failed",
+				state: verdict.observedEffects || []
+			};
+			await setNode(plan, node, "failed");
+			return {
+				node,
+				ok: false,
+				failure: node.failure
+			};
+		}
+		/**
+		* Run a plan serially (spec §12.1, §17: v1 is serial only).
+		* @returns final snapshot
+		*/
+		async function run(plan, runCtx) {
+			plan.status = "running";
+			await commit(plan);
+			let guard = 0;
+			const maxSteps = (Object.keys(plan.nodes).length + 1) * (rMax + 2);
+			while (guard++ < maxSteps) {
+				if (isGoalReached(plan)) {
+					plan.status = "succeeded";
+					await commit(plan);
+					break;
+				}
+				const ready = readyNodes(plan);
+				if (!ready.length) {
+					const anyFailed = Object.keys(plan.nodes).some((id) => plan.nodes[id].status === "failed");
+					const anyBlocked = Object.keys(plan.nodes).some((id) => plan.nodes[id].status === "blocked");
+					plan.status = anyFailed || anyBlocked ? "failed" : plan.status;
+					await commit(plan);
+					break;
+				}
+				const node = plan.nodes[ready[0]];
+				if (node.status === "pending") await setNode(plan, node, "ready");
+				if (!(await runNode(plan, node, runCtx)).ok) {
+					blockDescendants(plan, node.id);
+					await commit(plan);
+					plan.status = "failed";
+					await commit(plan);
+					break;
+				}
+			}
+			return planSnapshot(plan);
+		}
+		async function cancel(plan, runCtx) {
+			if (runCtx && typeof runCtx.cancel === "function") runCtx.cancel();
+			Object.keys(plan.nodes).forEach((id) => {
+				const n = plan.nodes[id];
+				if (n.status === "pending" || n.status === "ready" || n.status === "running" || n.status === "verifying") n.status = "cancelled";
+			});
+			plan.status = "cancelled";
+			await commit(plan);
+			return planSnapshot(plan);
+		}
+		async function resume(plan, runCtx) {
+			plan.status = "running";
+			await commit(plan);
+			return run(plan, runCtx);
+		}
+		return {
+			makeExecutionPlan,
+			run,
+			cancel,
+			resume,
+			snapshot: planSnapshot,
+			readyNodes,
+			isGoalReached,
+			NODE_STATUSES,
+			PLAN_STATUSES
+		};
+	}
 	module.exports = {
 		createGraspCore,
 		memoryStore,
@@ -1435,7 +1726,9 @@ var import_skill_dag = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 		parseFrontmatter,
 		parseInlineArray,
 		extractGraspMeta,
-		slug
+		slug,
+		createExecutor,
+		stableIdempotencyKey
 	};
 })))();
 const name = "grasp";
@@ -1841,12 +2134,164 @@ async function apply(ctx) {
 				skipped: skillSource.skipped(),
 				inferred: skillSource.inferred(),
 				hasLLM: !!llmClient,
-				persistent: false,
+				persistent: !!persistStore,
 				params: core.params
 			};
 		}
 	});
-	console.log("[grasp] host wired: llm=" + (llmClient ? "on" : "off") + " skills=session+workspace");
+	const plans = /* @__PURE__ */ new Map();
+	const coreStoreSet = async (id, plan) => {
+		const inner = ctx.get("storage");
+		if (inner) await inner.set("grasp:plan:" + id, JSON.stringify(plan));
+	};
+	const subagents = ctx.get("subagents");
+	const executor = (0, import_skill_dag.createExecutor)({
+		params: { rMax: 2 },
+		execute: async ({ node, plan }, runCtx) => {
+			if (!subagents || !runCtx || !runCtx.agent) return { error: "subagents service or parent agent unavailable (execution requires a live session)" };
+			const skill = await skillSource.get(node.skillId);
+			if (!skill) return { error: "skill not found: " + node.skillId };
+			const body = skill.content || "";
+			const promptText = [
+				"Execute this skill for a planned DAG node.",
+				"",
+				"Skill: " + skill.name || node.skillId,
+				"Arguments: " + JSON.stringify(node.args),
+				"Expected effects (verify these hold): " + JSON.stringify(node.expectedEffects),
+				"",
+				"Skill instructions:",
+				body,
+				"",
+				"Follow the skill instructions exactly. Report what you did and whether the expected effects hold."
+			].join("\n");
+			const res = await (await subagents.start({
+				prompt: [{
+					type: "text",
+					text: promptText
+				}],
+				parent: runCtx.agent,
+				signal: runCtx.signal || new AbortController().signal
+			})).result;
+			const text = Array.isArray(res.output) ? res.output.map((b) => b.text || "").join("") : String(res.output || "");
+			if (res.stopReason !== "completed") return { error: "child stopped: " + res.stopReason + (res.diagnostic ? " — " + res.diagnostic : "") };
+			return {
+				output: {
+					text,
+					structured: res.structured || null
+				},
+				evidence: [{
+					kind: "subagent",
+					stopReason: res.stopReason
+				}]
+			};
+		},
+		persist: async (plan) => {
+			plans.set(plan.id, plan);
+			try {
+				await coreStoreSet(plan.id, plan);
+			} catch {}
+		}
+	});
+	def({
+		name: "grasp_run",
+		description: "Execute a compiled plan: the scheduler serially runs each ready node (skill → subagent), verifies effects, blocks successors of failed nodes, and persists every state change. Pass a planId from grasp_compile_task output.",
+		parameters: { planId: {
+			type: "string",
+			required: true,
+			description: "Plan id returned by grasp_compile_task / grasp_compile."
+		} },
+		output: {
+			schema: OUT,
+			render: renderJson
+		},
+		async execute(args, exec) {
+			const dag = await core.getPlan(args.planId);
+			if (!dag) return {
+				ok: false,
+				error: "plan not found: " + args.planId
+			};
+			const plan = executor.makeExecutionPlan({
+				task: dag.task,
+				nodes: dag.nodes,
+				edges: dag.edges
+			}, args.planId, 1);
+			plans.set(args.planId, plan);
+			return {
+				ok: true,
+				snapshot: await executor.run(plan, { agent: exec && exec.agent })
+			};
+		}
+	});
+	def({
+		name: "grasp_status_plan",
+		description: "Report the current snapshot of one execution plan: node statuses, attempts, evidence, outputs, and plan status.",
+		parameters: { planId: {
+			type: "string",
+			required: true
+		} },
+		output: {
+			schema: OUT,
+			render: renderJson
+		},
+		async execute(args) {
+			const plan = plans.get(args.planId);
+			if (!plan) return {
+				ok: false,
+				error: "plan not found: " + args.planId
+			};
+			return {
+				ok: true,
+				snapshot: executor.snapshot(plan)
+			};
+		}
+	});
+	def({
+		name: "grasp_cancel",
+		description: "Cancel a running plan: propagate cancellation to the active subagent, mark pending/ready nodes cancelled, persist the cancellation. The plan and its history remain for inspection or resume.",
+		parameters: { planId: {
+			type: "string",
+			required: true
+		} },
+		output: {
+			schema: OUT,
+			render: renderJson
+		},
+		async execute(args) {
+			const plan = plans.get(args.planId);
+			if (!plan) return {
+				ok: false,
+				error: "plan not found: " + args.planId
+			};
+			return {
+				ok: true,
+				snapshot: await executor.cancel(plan)
+			};
+		}
+	});
+	def({
+		name: "grasp_resume",
+		description: "Resume a previously cancelled or failed plan from its persisted state: re-run ready nodes, continue the serial schedule.",
+		parameters: { planId: {
+			type: "string",
+			required: true
+		} },
+		output: {
+			schema: OUT,
+			render: renderJson
+		},
+		async execute(args, exec) {
+			const plan = plans.get(args.planId);
+			if (!plan) return {
+				ok: false,
+				error: "plan not found: " + args.planId
+			};
+			return {
+				ok: true,
+				snapshot: await executor.resume(plan, { agent: exec && exec.agent })
+			};
+		}
+	});
+	console.log("[grasp] host wired: llm=" + (llmClient ? "on" : "off") + " skills=session+workspace executor=" + (subagents ? "on" : "off"));
 }
 //#endregion
 export { apply, inject, name };

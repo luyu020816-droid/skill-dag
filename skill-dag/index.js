@@ -1073,8 +1073,248 @@ function kvStore(storage, prefix) {
   }
 }
 
+// ---- Execution layer (spec §10-§12): scheduler-owned node state machine ----
+
+const NODE_STATUSES = ['pending', 'ready', 'running', 'verifying', 'succeeded', 'failed', 'blocked', 'cancelled', 'outcome-unknown']
+const PLAN_STATUSES = ['pending', 'running', 'succeeded', 'failed', 'cancelled']
+
+// Allowed transitions per current status. The scheduler is the ONLY writer.
+const NODE_TRANSITIONS = {
+  pending: ['ready', 'blocked', 'cancelled'],
+  ready: ['running', 'cancelled'],
+  running: ['verifying', 'failed', 'outcome-unknown', 'cancelled'],
+  verifying: ['succeeded', 'failed', 'outcome-unknown', 'cancelled'],
+  succeeded: [],                    // immutable without an explicit retry attempt
+  failed: ['ready'],                // after repair / retry decision
+  blocked: ['ready', 'cancelled'],  // a blocked successor may become ready if the failed branch is repaired
+  cancelled: [],
+  'outcome-unknown': ['ready'],     // inspect() resolved it, or explicit new attempt
+}
+
+function assertTransition(nodeId, from, to) {
+  const allowed = NODE_TRANSITIONS[from]
+  if (!allowed || allowed.indexOf(to) < 0) {
+    throw new Error('invalid node transition ' + from + ' -> ' + to + ' (node ' + nodeId + ')')
+  }
+}
+
+function stableIdempotencyKey(planId, nodeId, attempt) {
+  // Deterministic, not random: recovery reuses the SAME key for the same attempt
+  // so a side effect is never applied twice (spec §16).
+  return 'grasp:idem:' + planId + ':' + nodeId + ':' + attempt
+}
+
+function makeExecutionPlan(compiled, id, version) {
+  const now = new Date().toISOString()
+  const nodes = {}
+  const edges = (compiled && compiled.edges) || []
+  const skills = (compiled && compiled.nodes) || []
+  skills.forEach((n, i) => {
+    const nid = n.id || ('n' + (i + 1))
+    nodes[nid] = {
+      id: nid, skillId: n.skill, args: (n.args || []).slice(),
+      preconditions: (n.precondition || []).slice(),
+      expectedEffects: (n.effect || []).slice(),
+      status: 'pending', attempt: 0,
+      idempotencyKey: null, evidence: [], output: null, failure: null,
+    }
+  })
+  return {
+    id, version: version || 1, task: (compiled && compiled.task) || '',
+    status: 'pending', nodes, edges: edges.map(e => ({ from: e.from, to: e.to, type: e.type, label: e.label })),
+    createdAt: now, updatedAt: now,
+  }
+}
+
+function planSnapshot(plan) {
+  return {
+    id: plan.id, version: plan.version, task: plan.task, status: plan.status,
+    nodes: Object.fromEntries(Object.entries(plan.nodes).map(([k, n]) => [k, {
+      id: n.id, skillId: n.skillId, args: n.args, preconditions: n.preconditions,
+      expectedEffects: n.expectedEffects, status: n.status, attempt: n.attempt,
+      idempotencyKey: n.idempotencyKey, evidence: n.evidence, output: n.output, failure: n.failure,
+    }])),
+    edges: plan.edges, createdAt: plan.createdAt, updatedAt: plan.updatedAt,
+  }
+}
+
+// Nodes whose prerequisites are all succeeded (or that have no prerequisites).
+function readyNodes(plan) {
+  const preds = {}
+  plan.edges.forEach(e => { (preds[e.to] = preds[e.to] || []).push(e.from) })
+  return Object.keys(plan.nodes).filter(id => {
+    const n = plan.nodes[id]
+    if (n.status !== 'pending' && n.status !== 'ready') return false
+    const deps = preds[id] || []
+    return deps.every(d => {
+      const dn = plan.nodes[d]
+      return dn && dn.status === 'succeeded'
+    })
+  })
+}
+
+function isGoalReached(plan) {
+  const hasOut = {}
+  plan.edges.forEach(e => { hasOut[e.from] = true })
+  const goalNodes = Object.keys(plan.nodes).filter(id => !hasOut[id])
+  // A plan succeeds when every node that feeds no successor is succeeded
+  // (mirrors the compiled DAG's snk reachability).
+  return goalNodes.length > 0 && goalNodes.every(id => plan.nodes[id].status === 'succeeded')
+}
+
+// Block all pending/ready descendants of a failed node (spec §12.1).
+function blockDescendants(plan, failedId) {
+  const adj = {}
+  plan.edges.forEach(e => { (adj[e.from] = adj[e.from] || []).push(e.to) })
+  const stack = [failedId]
+  const visited = new Set()
+  while (stack.length) {
+    const cur = stack.pop()
+    if (visited.has(cur)) continue
+    visited.add(cur)
+    const n = plan.nodes[cur]
+    if (n && (n.status === 'pending' || n.status === 'ready')) n.status = 'blocked'
+    ;(adj[cur] || []).forEach(t => stack.push(t))
+  }
+}
+
+// Verify one node after execution using the injected verifier; falls back to a
+// structural check when no verifier is provided (spec §14).
+async function verifyNodeResult(plan, node, verifier, executorResult) {
+  if (verifier) {
+    return verifier({ plan, node, output: executorResult })
+  }
+  const passed = !executorResult.error
+  return {
+    passed,
+    observedEffects: passed ? node.expectedEffects.slice() : [],
+    evidence: [], reason: passed ? undefined : String(executorResult.error || 'executor failed'),
+  }
+}
+
+/**
+ * Create a plan executor. Pure core: the scheduler owns every node transition;
+ * executors and verifiers are injected by the host adapter and only RETURN
+ * results — they never write node status (spec §12, §24.3).
+ *
+ * @param {object} deps
+ * @param {Function} deps.execute   - (node, ctx) => Promise<{output?, error?}>; one node -> one execution
+ * @param {Function} [deps.verify]  - (req) => Promise<{passed, observedEffects?, evidence?, reason?}>
+ * @param {Function} [deps.persist] - (plan) => Promise<void>; durable write after every state change
+ * @param {object}  [deps.params]   - { rMax?, timeoutMs? }
+ */
+function createExecutor(deps) {
+  const execute = deps.execute
+  if (typeof execute !== 'function') throw new Error('createExecutor: execute is required')
+  const verify = deps.verify || null
+  const persist = deps.persist || null
+  const params = deps.params || {}
+  const rMax = params.rMax || 2
+
+  async function commit(plan) {
+    plan.updatedAt = new Date().toISOString()
+    if (persist) await persist(plan)
+  }
+
+  async function setNode(plan, node, to) {
+    assertTransition(node.id, node.status, to)
+    node.status = to
+    if (to === 'running') {
+      node.attempt++
+      node.idempotencyKey = stableIdempotencyKey(plan.id, node.id, node.attempt)
+    }
+    await commit(plan)
+  }
+
+  // Run one node: ready -> running -> verifying -> succeeded/failed.
+  async function runNode(plan, node, runCtx) {
+    await setNode(plan, node, 'running')
+    let result
+    try {
+      result = await execute({ node, plan, idempotencyKey: node.idempotencyKey }, runCtx)
+    } catch (e) {
+      result = { error: String(e && e.message || e) }
+    }
+    // Persist raw result + evidence before verification (spec §16).
+    node.output = (result && 'output' in result) ? result.output : null
+    if (result && Array.isArray(result.evidence)) node.evidence = result.evidence
+    await commit(plan)
+
+    await setNode(plan, node, 'verifying')
+    const verdict = await verifyNodeResult(plan, node, verify, result || {})
+    node.evidence = node.evidence.concat(verdict.evidence || [])
+    if (verdict.passed) {
+      await setNode(plan, node, 'succeeded')
+      return { node, ok: true }
+    }
+    node.failure = {
+      type: 'verification', message: verdict.reason || 'verification failed',
+      state: verdict.observedEffects || [],
+    }
+    await setNode(plan, node, 'failed')
+    return { node, ok: false, failure: node.failure }
+  }
+
+  /**
+   * Run a plan serially (spec §12.1, §17: v1 is serial only).
+   * @returns final snapshot
+   */
+  async function run(plan, runCtx) {
+    plan.status = 'running'
+    await commit(plan)
+    let guard = 0
+    const maxSteps = (Object.keys(plan.nodes).length + 1) * (rMax + 2)
+    while (guard++ < maxSteps) {
+      if (isGoalReached(plan)) { plan.status = 'succeeded'; await commit(plan); break }
+      const ready = readyNodes(plan)
+      if (!ready.length) {
+        // No ready node and goal not reached: either blocked or exhausted.
+        const anyFailed = Object.keys(plan.nodes).some(id => plan.nodes[id].status === 'failed')
+        const anyBlocked = Object.keys(plan.nodes).some(id => plan.nodes[id].status === 'blocked')
+        plan.status = anyFailed || anyBlocked ? 'failed' : plan.status
+        await commit(plan)
+        break
+      }
+      // Serial: pick the first ready node in deterministic (plan) order.
+      const node = plan.nodes[ready[0]]
+      if (node.status === 'pending') await setNode(plan, node, 'ready')
+      const outcome = await runNode(plan, node, runCtx)
+      if (!outcome.ok) {
+        blockDescendants(plan, node.id)
+        await commit(plan)
+        plan.status = 'failed'
+        await commit(plan)
+        break
+      }
+    }
+    return planSnapshot(plan)
+  }
+
+  async function cancel(plan, runCtx) {
+    if (runCtx && typeof runCtx.cancel === 'function') runCtx.cancel()
+    Object.keys(plan.nodes).forEach(id => {
+      const n = plan.nodes[id]
+      if (n.status === 'pending' || n.status === 'ready' || n.status === 'running' || n.status === 'verifying') {
+        n.status = 'cancelled'
+      }
+    })
+    plan.status = 'cancelled'
+    await commit(plan)
+    return planSnapshot(plan)
+  }
+
+  async function resume(plan, runCtx) {
+    plan.status = 'running'
+    await commit(plan)
+    return run(plan, runCtx)
+  }
+
+  return { makeExecutionPlan, run, cancel, resume, snapshot: planSnapshot, readyNodes, isGoalReached, NODE_STATUSES, PLAN_STATUSES }
+}
+
 module.exports = {
   createGraspCore, memoryStore, DEFAULT_PARAMS, BUILTIN_OPERATORS, DEFAULT_ORDER,
   manifestSource, dshSkillsSource, frontmatterSource, createProposer, kvStore,
-  parseFrontmatter, parseInlineArray, extractGraspMeta, slug
+  parseFrontmatter, parseInlineArray, extractGraspMeta, slug,
+  createExecutor, stableIdempotencyKey
 }
